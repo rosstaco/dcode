@@ -52,9 +52,27 @@ def build_uri(host_path: str, workspace_folder: str) -> str:
     return f"vscode-remote://dev-container+{hex_path}{workspace_folder}"
 
 
+def _wsl_to_windows_path(linux_path: str) -> str:
+    """Convert a WSL Linux path to a Windows UNC path."""
+    try:
+        result = subprocess.run(
+            ["wslpath", "-w", linux_path],
+            capture_output=True, text=True, timeout=5,
+        )
+        win_path = result.stdout.strip()
+        if win_path:
+            return win_path
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    # Fallback: construct UNC path manually
+    distro = get_wsl_distro() or "Ubuntu"
+    return f"\\\\wsl.localhost\\{distro}{linux_path}"
+
+
 def build_uri_wsl(host_path: str, workspace_folder: str) -> str:
-    """Build the URI with a JSON object so VS Code knows about the host context."""
-    payload = json.dumps({"hostPath": host_path}, separators=(",", ":"))
+    """Build the URI with Windows UNC path so VS Code finds the WSL folder."""
+    win_path = _wsl_to_windows_path(host_path)
+    payload = json.dumps({"hostPath": win_path}, separators=(",", ":"))
     hex_payload = payload.encode().hex()
     return f"vscode-remote://dev-container+{hex_payload}{workspace_folder}"
 

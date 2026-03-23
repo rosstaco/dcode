@@ -28,18 +28,19 @@ class TestBuildUri:
 
 
 class TestBuildUriWsl:
-    def test_builds_json_payload_uri(self):
-        uri = build_uri_wsl("/home/ross/repos/myapp", "/workspaces/myapp")
+    def test_builds_json_payload_with_windows_path(self):
+        with patch("dcode.cli._wsl_to_windows_path", return_value="\\\\wsl.localhost\\Ubuntu\\home\\ross\\repos\\myapp"):
+            uri = build_uri_wsl("/home/ross/repos/myapp", "/workspaces/myapp")
         assert "vscode-remote://dev-container+" in uri
         assert uri.endswith("/workspaces/myapp")
-        # Decode the hex portion and verify it's JSON with hostPath
         hex_part = uri.split("dev-container+")[1].split("/workspaces/")[0]
         payload = json.loads(bytes.fromhex(hex_part).decode())
-        assert payload == {"hostPath": "/home/ross/repos/myapp"}
+        assert payload == {"hostPath": "\\\\wsl.localhost\\Ubuntu\\home\\ross\\repos\\myapp"}
 
     def test_wsl_uri_differs_from_plain(self):
+        with patch("dcode.cli._wsl_to_windows_path", return_value="\\\\wsl.localhost\\Ubuntu\\home\\ross\\project"):
+            wsl = build_uri_wsl("/home/ross/project", "/workspaces/project")
         plain = build_uri("/home/ross/project", "/workspaces/project")
-        wsl = build_uri_wsl("/home/ross/project", "/workspaces/project")
         assert plain != wsl
 
 
@@ -143,10 +144,12 @@ class TestMain:
         dc_dir.mkdir()
         (dc_dir / "devcontainer.json").write_text('{"name": "test"}')
 
+        unc = f"\\\\wsl.localhost\\Ubuntu{tmp_path}"
         with (
             patch("dcode.cli.subprocess.run") as mock_run,
             patch("dcode.cli.is_wsl", return_value=True),
             patch("dcode.cli._ensure_wsl_docker_settings"),
+            patch("dcode.cli._wsl_to_windows_path", return_value=unc),
         ):
             from dcode.cli import run_dcode
             run_dcode(str(tmp_path), insiders=False)
@@ -154,10 +157,10 @@ class TestMain:
         args = mock_run.call_args[0][0]
         assert args[0] == "code"
         assert args[1] == "--folder-uri"
-        # WSL URI should contain a JSON payload with hostPath
+        # WSL URI should contain a JSON payload with Windows UNC hostPath
         hex_part = args[2].split("dev-container+")[1].split("/workspaces/")[0]
         payload = json.loads(bytes.fromhex(hex_part).decode())
-        assert "hostPath" in payload
+        assert payload["hostPath"] == unc
 
 
 class TestEnsureWslDockerSettings:
