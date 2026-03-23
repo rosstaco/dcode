@@ -1,3 +1,3 @@
 """dcode — open folders in VS Code devcontainers from the CLI."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

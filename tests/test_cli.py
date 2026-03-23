@@ -1,11 +1,12 @@
 """Tests for dcode CLI."""
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from dcode.cli import build_uri, find_devcontainer, get_workspace_folder
+from dcode.cli import build_uri, build_uri_wsl, find_devcontainer, get_workspace_folder
 
 
 class TestBuildUri:
@@ -24,6 +25,22 @@ class TestBuildUri:
     def test_custom_workspace_folder(self):
         uri = build_uri("/some/path", "/workspace")
         assert uri.endswith("/workspace")
+
+
+class TestBuildUriWsl:
+    def test_builds_json_payload_uri(self):
+        uri = build_uri_wsl("/home/ross/repos/myapp", "/workspaces/myapp")
+        assert "vscode-remote://dev-container+" in uri
+        assert uri.endswith("/workspaces/myapp")
+        # Decode the hex portion and verify it's JSON with hostPath
+        hex_part = uri.split("dev-container+")[1].split("/workspaces/")[0]
+        payload = json.loads(bytes.fromhex(hex_part).decode())
+        assert payload == {"hostPath": "/home/ross/repos/myapp"}
+
+    def test_wsl_uri_differs_from_plain(self):
+        plain = build_uri("/home/ross/project", "/workspaces/project")
+        wsl = build_uri_wsl("/home/ross/project", "/workspaces/project")
+        assert plain != wsl
 
 
 class TestFindDevcontainer:
@@ -120,3 +137,67 @@ class TestMain:
 
         args = mock_run.call_args[0][0]
         assert args == ["code", str(tmp_path)]
+
+    def test_uses_wsl_uri_on_wsl(self, tmp_path):
+        dc_dir = tmp_path / ".devcontainer"
+        dc_dir.mkdir()
+        (dc_dir / "devcontainer.json").write_text('{"name": "test"}')
+
+        with (
+            patch("dcode.cli.subprocess.run") as mock_run,
+            patch("dcode.cli.is_wsl", return_value=True),
+            patch("dcode.cli._ensure_wsl_docker_settings"),
+        ):
+            from dcode.cli import run_dcode
+            run_dcode(str(tmp_path), insiders=False)
+
+        args = mock_run.call_args[0][0]
+        assert args[0] == "code"
+        assert args[1] == "--folder-uri"
+        # WSL URI should contain a JSON payload with hostPath
+        hex_part = args[2].split("dev-container+")[1].split("/workspaces/")[0]
+        payload = json.loads(bytes.fromhex(hex_part).decode())
+        assert "hostPath" in payload
+
+
+class TestEnsureWslDockerSettings:
+    def test_patches_settings_when_not_configured(self, tmp_path):
+        settings_file = tmp_path / "Code" / "User" / "settings.json"
+        settings_file.parent.mkdir(parents=True)
+        settings_file.write_text('{"editor.fontSize": 14}')
+
+        with (
+            patch("dcode.cli._get_windows_vscode_settings_path", return_value=settings_file),
+            patch("dcode.cli.get_wsl_distro", return_value="Ubuntu"),
+        ):
+            from dcode.cli import _ensure_wsl_docker_settings
+            _ensure_wsl_docker_settings()
+
+        result = json.loads(settings_file.read_text())
+        assert result["dev.containers.executeInWSL"] is True
+        assert result["dev.containers.executeInWSLDistro"] == "Ubuntu"
+        assert result["editor.fontSize"] == 14  # preserved
+
+    def test_skips_when_already_configured(self, tmp_path):
+        settings_file = tmp_path / "Code" / "User" / "settings.json"
+        settings_file.parent.mkdir(parents=True)
+        original = '{"dev.containers.executeInWSL": true, "other": 1}'
+        settings_file.write_text(original)
+
+        with (
+            patch("dcode.cli._get_windows_vscode_settings_path", return_value=settings_file),
+            patch("dcode.cli.get_wsl_distro", return_value="Ubuntu"),
+        ):
+            from dcode.cli import _ensure_wsl_docker_settings
+            _ensure_wsl_docker_settings()
+
+        # File should not be rewritten (no distro added since executeInWSL already set)
+        result = json.loads(settings_file.read_text())
+        assert result["dev.containers.executeInWSL"] is True
+
+    def test_falls_back_to_hint_when_path_not_found(self, capsys):
+        with patch("dcode.cli._get_windows_vscode_settings_path", return_value=None):
+            from dcode.cli import _ensure_wsl_docker_settings
+            _ensure_wsl_docker_settings()
+
+        assert "dev.containers.executeInWSL" in capsys.readouterr().err
