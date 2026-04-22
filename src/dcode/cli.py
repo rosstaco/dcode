@@ -27,6 +27,16 @@ def get_wsl_distro() -> str | None:
     return os.environ.get("WSL_DISTRO_NAME")
 
 
+def _find_repo_root(start: Path) -> Path | None:
+    """Walk up from *start* looking for a parent that contains a ``.git`` directory."""
+    current = start.parent
+    while current != current.parent:
+        if (current / ".git").is_dir():
+            return current
+        current = current.parent
+    return None
+
+
 def resolve_worktree(target: Path) -> tuple[Path, Path] | None:
     """If *target* is a git worktree root, return ``(main_repo, rel_path)``.
 
@@ -58,12 +68,20 @@ def resolve_worktree(target: Path) -> tuple[Path, Path] | None:
 
     main_repo = gitdir.parent.parent.parent  # <repo>/.git/worktrees/<n> → <repo>
 
+    # The gitdir may contain an absolute path from a different environment
+    # (e.g. a container path when running on the host).  Fall back to
+    # walking the filesystem when the derived main_repo doesn't exist.
+    if not main_repo.is_dir():
+        main_repo = _find_repo_root(target)
+        if main_repo is None:
+            return None
+
     try:
         rel_path = target.relative_to(main_repo)
     except ValueError:
         print(
-            f"dcode: worktree is outside the main repo tree — "
-            f"shared-container mode is not supported for external worktrees",
+            "dcode: worktree is outside the main repo tree — "
+            "shared-container mode is not supported for external worktrees",
             file=sys.stderr,
         )
         return None

@@ -282,6 +282,20 @@ class TestResolveWorktree:
         (tmp_path / ".git").write_text("not a valid gitdir line\n")
         assert resolve_worktree(tmp_path) is None
 
+    def test_resolves_worktree_with_foreign_absolute_gitdir(self, tmp_path):
+        """Worktree created inside a devcontainer has a container-absolute path."""
+        main_repo, worktree = _make_worktree(tmp_path)
+        # Overwrite with a path that doesn't exist on the host (container path)
+        (worktree / ".git").write_text(
+            "gitdir: /workspaces/myapp/.git/worktrees/pr-34\n"
+        )
+
+        result = resolve_worktree(worktree)
+        assert result is not None
+        main, rel = result
+        assert main == main_repo
+        assert rel == Path(".worktrees/pr-34")
+
 
 class TestRunDcodeWorktree:
     def test_worktree_uses_main_repo_host_path(self, tmp_path):
