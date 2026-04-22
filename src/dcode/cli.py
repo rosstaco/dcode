@@ -27,6 +27,50 @@ def get_wsl_distro() -> str | None:
     return os.environ.get("WSL_DISTRO_NAME")
 
 
+def resolve_worktree(target: Path) -> tuple[Path, Path] | None:
+    """If *target* is a git worktree root, return ``(main_repo, rel_path)``.
+
+    *main_repo* is the root of the repository that owns the worktree, and
+    *rel_path* is the worktree's location relative to *main_repo*.
+
+    Returns ``None`` when *target* is not a worktree, is a submodule, or
+    the worktree lives outside the main repository tree.
+    """
+    git_file = target / ".git"
+    if not git_file.is_file():
+        return None
+
+    try:
+        content = git_file.read_text().strip()
+    except OSError:
+        return None
+
+    if not content.startswith("gitdir:"):
+        return None
+
+    gitdir_ref = content.split("gitdir:", 1)[1].strip()
+    gitdir = (target / gitdir_ref).resolve()
+
+    # Worktrees point to <repo>/.git/worktrees/<name>.
+    # Submodules point to <repo>/.git/modules/<name> — reject those.
+    if gitdir.parent.name != "worktrees" or gitdir.parent.parent.name != ".git":
+        return None
+
+    main_repo = gitdir.parent.parent.parent  # <repo>/.git/worktrees/<n> → <repo>
+
+    try:
+        rel_path = target.relative_to(main_repo)
+    except ValueError:
+        print(
+            f"dcode: worktree is outside the main repo tree — "
+            f"shared-container mode is not supported for external worktrees",
+            file=sys.stderr,
+        )
+        return None
+
+    return (main_repo, rel_path)
+
+
 def find_devcontainer(target: Path) -> Path | None:
     """Find devcontainer.json in the target directory."""
     candidates = [
@@ -155,18 +199,33 @@ def run_dcode(path: str, *, insiders: bool = False) -> None:
     editor = "code-insiders" if insiders else "code"
     target = Path(path).resolve()
 
-    devcontainer = find_devcontainer(target)
+    # For worktrees, resolve the main repo so all worktrees share one container.
+    worktree = resolve_worktree(target)
+    if worktree is not None:
+        main_repo, rel_path = worktree
+        devcontainer = find_devcontainer(main_repo)
+    else:
+        main_repo = None
+        rel_path = None
+        devcontainer = find_devcontainer(target)
+
     if devcontainer is None:
         subprocess.run([editor, str(target)])
         return
 
-    workspace_folder = get_workspace_folder(devcontainer, target)
+    if main_repo is not None:
+        host_path = str(main_repo)
+        base_folder = get_workspace_folder(devcontainer, main_repo)
+        workspace_folder = f"{base_folder}/{rel_path.as_posix()}"
+    else:
+        host_path = str(target)
+        workspace_folder = get_workspace_folder(devcontainer, target)
 
     if is_wsl():
-        uri = build_uri_wsl(str(target), workspace_folder)
+        uri = build_uri_wsl(host_path, workspace_folder)
         _ensure_wsl_docker_settings(insiders=insiders)
     else:
-        uri = build_uri(str(target), workspace_folder)
+        uri = build_uri(host_path, workspace_folder)
 
     subprocess.run([editor, "--folder-uri", uri])
 

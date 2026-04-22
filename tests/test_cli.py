@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from dcode.cli import build_uri, build_uri_wsl, find_devcontainer, get_workspace_folder
+from dcode.cli import build_uri, build_uri_wsl, find_devcontainer, get_workspace_folder, resolve_worktree
 
 
 class TestBuildUri:
@@ -204,3 +204,164 @@ class TestEnsureWslDockerSettings:
             _ensure_wsl_docker_settings()
 
         assert "dev.containers.executeInWSL" in capsys.readouterr().err
+
+
+def _make_worktree(tmp_path: Path, name: str = "pr-34") -> tuple[Path, Path]:
+    """Create a fake main-repo + worktree layout and return (main_repo, worktree)."""
+    main_repo = tmp_path / "main-repo"
+    main_repo.mkdir()
+    (main_repo / ".git").mkdir()
+    (main_repo / ".git" / "worktrees" / name).mkdir(parents=True)
+
+    worktree = main_repo / ".worktrees" / name
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: ../../.git/worktrees/{name}\n")
+    return main_repo, worktree
+
+
+class TestResolveWorktree:
+    def test_returns_none_for_normal_repo(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        assert resolve_worktree(tmp_path) is None
+
+    def test_returns_none_when_no_git(self, tmp_path):
+        assert resolve_worktree(tmp_path) is None
+
+    def test_resolves_worktree_with_relative_gitdir(self, tmp_path):
+        main_repo, worktree = _make_worktree(tmp_path)
+
+        result = resolve_worktree(worktree)
+        assert result is not None
+        main, rel = result
+        assert main == main_repo
+        assert rel == Path(".worktrees/pr-34")
+
+    def test_resolves_worktree_with_absolute_gitdir(self, tmp_path):
+        main_repo = tmp_path / "main-repo"
+        main_repo.mkdir()
+        git_dir = main_repo / ".git"
+        git_dir.mkdir()
+        wt_meta = git_dir / "worktrees" / "feature"
+        wt_meta.mkdir(parents=True)
+
+        worktree = main_repo / ".worktrees" / "feature"
+        worktree.mkdir(parents=True)
+        (worktree / ".git").write_text(f"gitdir: {wt_meta}\n")
+
+        result = resolve_worktree(worktree)
+        assert result is not None
+        main, rel = result
+        assert main == main_repo
+        assert rel == Path(".worktrees/feature")
+
+    def test_returns_none_for_submodule(self, tmp_path):
+        main_repo = tmp_path / "main-repo"
+        main_repo.mkdir()
+        (main_repo / ".git").mkdir()
+        (main_repo / ".git" / "modules" / "sub").mkdir(parents=True)
+
+        submodule = main_repo / "sub"
+        submodule.mkdir()
+        (submodule / ".git").write_text("gitdir: ../.git/modules/sub\n")
+
+        assert resolve_worktree(submodule) is None
+
+    def test_returns_none_for_external_worktree(self, tmp_path):
+        main_repo = tmp_path / "main-repo"
+        main_repo.mkdir()
+        (main_repo / ".git").mkdir()
+        (main_repo / ".git" / "worktrees" / "ext").mkdir(parents=True)
+
+        external = tmp_path / "elsewhere" / "ext"
+        external.mkdir(parents=True)
+        (external / ".git").write_text(f"gitdir: {main_repo / '.git' / 'worktrees' / 'ext'}\n")
+
+        assert resolve_worktree(external) is None
+
+    def test_returns_none_for_malformed_git_file(self, tmp_path):
+        (tmp_path / ".git").write_text("not a valid gitdir line\n")
+        assert resolve_worktree(tmp_path) is None
+
+
+class TestRunDcodeWorktree:
+    def test_worktree_uses_main_repo_host_path(self, tmp_path):
+        main_repo, worktree = _make_worktree(tmp_path)
+        dc_dir = main_repo / ".devcontainer"
+        dc_dir.mkdir()
+        (dc_dir / "devcontainer.json").write_text('{"name": "test"}')
+
+        with patch("dcode.cli.subprocess.run") as mock_run:
+            from dcode.cli import run_dcode
+            run_dcode(str(worktree))
+
+        args = mock_run.call_args[0][0]
+        assert args[1] == "--folder-uri"
+        uri = args[2]
+        hex_part = uri.split("dev-container+")[1].split("/workspaces/")[0]
+        decoded_path = bytes.fromhex(hex_part).decode()
+        assert decoded_path == str(main_repo)
+
+    def test_worktree_workspace_folder_includes_relative_path(self, tmp_path):
+        main_repo, worktree = _make_worktree(tmp_path)
+        dc_dir = main_repo / ".devcontainer"
+        dc_dir.mkdir()
+        (dc_dir / "devcontainer.json").write_text('{"name": "test"}')
+
+        with patch("dcode.cli.subprocess.run") as mock_run:
+            from dcode.cli import run_dcode
+            run_dcode(str(worktree))
+
+        uri = mock_run.call_args[0][0][2]
+        assert uri.endswith("/workspaces/main-repo/.worktrees/pr-34")
+
+    def test_multiple_worktrees_share_same_container(self, tmp_path):
+        main_repo = tmp_path / "main-repo"
+        main_repo.mkdir()
+        (main_repo / ".git").mkdir()
+        dc_dir = main_repo / ".devcontainer"
+        dc_dir.mkdir()
+        (dc_dir / "devcontainer.json").write_text('{"name": "test"}')
+
+        uris = []
+        for name in ["pr-1", "pr-2"]:
+            (main_repo / ".git" / "worktrees" / name).mkdir(parents=True)
+            wt = main_repo / ".worktrees" / name
+            wt.mkdir(parents=True)
+            (wt / ".git").write_text(f"gitdir: ../../.git/worktrees/{name}\n")
+
+            with patch("dcode.cli.subprocess.run") as mock_run:
+                from dcode.cli import run_dcode
+                run_dcode(str(wt))
+            uris.append(mock_run.call_args[0][0][2])
+
+        # Same hex prefix = same container
+        hex1 = uris[0].split("dev-container+")[1].split("/workspaces/")[0]
+        hex2 = uris[1].split("dev-container+")[1].split("/workspaces/")[0]
+        assert hex1 == hex2
+
+        # Different workspace folders
+        assert uris[0].endswith("/.worktrees/pr-1")
+        assert uris[1].endswith("/.worktrees/pr-2")
+
+    def test_worktree_falls_back_when_no_devcontainer_in_main_repo(self, tmp_path):
+        main_repo, worktree = _make_worktree(tmp_path)
+
+        with patch("dcode.cli.subprocess.run") as mock_run:
+            from dcode.cli import run_dcode
+            run_dcode(str(worktree))
+
+        args = mock_run.call_args[0][0]
+        assert args == ["code", str(worktree)]
+
+    def test_worktree_with_custom_workspace_folder(self, tmp_path):
+        main_repo, worktree = _make_worktree(tmp_path)
+        dc_dir = main_repo / ".devcontainer"
+        dc_dir.mkdir()
+        (dc_dir / "devcontainer.json").write_text('{"workspaceFolder": "/workspace"}')
+
+        with patch("dcode.cli.subprocess.run") as mock_run:
+            from dcode.cli import run_dcode
+            run_dcode(str(worktree))
+
+        uri = mock_run.call_args[0][0][2]
+        assert uri.endswith("/workspace/.worktrees/pr-34")
