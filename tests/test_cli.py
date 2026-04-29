@@ -7,13 +7,13 @@ from unittest.mock import patch
 
 import pytest
 
-from dcode.cli import (
+from dcode.core import (
     build_uri,
-    build_uri_wsl,
     find_devcontainer,
     get_workspace_folder,
     resolve_worktree,
 )
+from dcode.wsl import build_uri_wsl
 
 
 def _ok():
@@ -41,7 +41,7 @@ class TestBuildUri:
 
 class TestBuildUriWsl:
     def test_builds_json_payload_with_windows_path(self):
-        with patch("dcode.cli._wsl_to_windows_path", return_value="\\\\wsl.localhost\\Ubuntu\\home\\ross\\repos\\myapp"):
+        with patch("dcode.wsl._wsl_to_windows_path", return_value="\\\\wsl.localhost\\Ubuntu\\home\\ross\\repos\\myapp"):
             uri = build_uri_wsl("/home/ross/repos/myapp", "/workspaces/myapp")
         assert "vscode-remote://dev-container+" in uri
         assert uri.endswith("/workspaces/myapp")
@@ -50,7 +50,7 @@ class TestBuildUriWsl:
         assert payload == {"hostPath": "\\\\wsl.localhost\\Ubuntu\\home\\ross\\repos\\myapp"}
 
     def test_wsl_uri_differs_from_plain(self):
-        with patch("dcode.cli._wsl_to_windows_path", return_value="\\\\wsl.localhost\\Ubuntu\\home\\ross\\project"):
+        with patch("dcode.wsl._wsl_to_windows_path", return_value="\\\\wsl.localhost\\Ubuntu\\home\\ross\\project"):
             wsl = build_uri_wsl("/home/ross/project", "/workspaces/project")
         plain = build_uri("/home/ross/project", "/workspaces/project")
         assert plain != wsl
@@ -139,8 +139,8 @@ class TestMain:
         dc_dir.mkdir()
         (dc_dir / "devcontainer.json").write_text('{"name": "test"}')
 
-        with patch("dcode.cli.subprocess.run", return_value=_ok()) as mock_run:
-            from dcode.cli import run_dcode
+        with patch("dcode.core.subprocess.run", return_value=_ok()) as mock_run:
+            from dcode.core import run_dcode
             run_dcode(str(tmp_path), insiders=False)
 
         args = mock_run.call_args[0][0]
@@ -153,16 +153,16 @@ class TestMain:
         dc_dir.mkdir()
         (dc_dir / "devcontainer.json").write_text('{"name": "test"}')
 
-        with patch("dcode.cli.subprocess.run", return_value=_ok()) as mock_run:
-            from dcode.cli import run_dcode
+        with patch("dcode.core.subprocess.run", return_value=_ok()) as mock_run:
+            from dcode.core import run_dcode
             run_dcode(str(tmp_path), insiders=True)
 
         args = mock_run.call_args[0][0]
         assert args[0] == "code-insiders"
 
     def test_fallback_without_devcontainer(self, tmp_path):
-        with patch("dcode.cli.subprocess.run", return_value=_ok()) as mock_run:
-            from dcode.cli import run_dcode
+        with patch("dcode.core.subprocess.run", return_value=_ok()) as mock_run:
+            from dcode.core import run_dcode
             run_dcode(str(tmp_path), insiders=False)
 
         args = mock_run.call_args[0][0]
@@ -170,8 +170,8 @@ class TestMain:
 
     def test_propagates_nonzero_exit_from_code_launcher(self, tmp_path):
         failed = subprocess.CompletedProcess(args=[], returncode=2)
-        with patch("dcode.cli.subprocess.run", return_value=failed):
-            from dcode.cli import run_dcode
+        with patch("dcode.core.subprocess.run", return_value=failed):
+            from dcode.core import run_dcode
             with pytest.raises(SystemExit) as exc:
                 run_dcode(str(tmp_path), insiders=False)
         assert exc.value.code == 2
@@ -182,8 +182,8 @@ class TestMain:
         (dc_dir / "devcontainer.json").write_text('{"name": "test"}')
 
         failed = subprocess.CompletedProcess(args=[], returncode=3)
-        with patch("dcode.cli.subprocess.run", return_value=failed):
-            from dcode.cli import run_dcode
+        with patch("dcode.core.subprocess.run", return_value=failed):
+            from dcode.core import run_dcode
             with pytest.raises(SystemExit) as exc:
                 run_dcode(str(tmp_path), insiders=False)
         assert exc.value.code == 3
@@ -195,12 +195,12 @@ class TestMain:
 
         unc = f"\\\\wsl.localhost\\Ubuntu{tmp_path}"
         with (
-            patch("dcode.cli.subprocess.run", return_value=_ok()) as mock_run,
-            patch("dcode.cli.is_wsl", return_value=True),
-            patch("dcode.cli._ensure_wsl_docker_settings"),
-            patch("dcode.cli._wsl_to_windows_path", return_value=unc),
+            patch("dcode.core.subprocess.run", return_value=_ok()) as mock_run,
+            patch("dcode.core.is_wsl", return_value=True),
+            patch("dcode.core._ensure_wsl_docker_settings"),
+            patch("dcode.wsl._wsl_to_windows_path", return_value=unc),
         ):
-            from dcode.cli import run_dcode
+            from dcode.core import run_dcode
             run_dcode(str(tmp_path), insiders=False)
 
         args = mock_run.call_args[0][0]
@@ -219,10 +219,10 @@ class TestEnsureWslDockerSettings:
         settings_file.write_text('{"editor.fontSize": 14}')
 
         with (
-            patch("dcode.cli._get_windows_vscode_settings_path", return_value=settings_file),
-            patch("dcode.cli.get_wsl_distro", return_value="Ubuntu"),
+            patch("dcode.wsl._get_windows_vscode_settings_path", return_value=settings_file),
+            patch("dcode.wsl.get_wsl_distro", return_value="Ubuntu"),
         ):
-            from dcode.cli import _ensure_wsl_docker_settings
+            from dcode.wsl import _ensure_wsl_docker_settings
             _ensure_wsl_docker_settings()
 
         result = json.loads(settings_file.read_text())
@@ -236,10 +236,10 @@ class TestEnsureWslDockerSettings:
         settings_file.write_text('{"dev.containers.executeInWSL": true, "other": 1}')
 
         with (
-            patch("dcode.cli._get_windows_vscode_settings_path", return_value=settings_file),
-            patch("dcode.cli.get_wsl_distro", return_value="Ubuntu"),
+            patch("dcode.wsl._get_windows_vscode_settings_path", return_value=settings_file),
+            patch("dcode.wsl.get_wsl_distro", return_value="Ubuntu"),
         ):
-            from dcode.cli import _ensure_wsl_docker_settings
+            from dcode.wsl import _ensure_wsl_docker_settings
             _ensure_wsl_docker_settings()
 
         result = json.loads(settings_file.read_text())
@@ -257,10 +257,10 @@ class TestEnsureWslDockerSettings:
         settings_file.write_text(original)
 
         with (
-            patch("dcode.cli._get_windows_vscode_settings_path", return_value=settings_file),
-            patch("dcode.cli.get_wsl_distro", return_value="Ubuntu"),
+            patch("dcode.wsl._get_windows_vscode_settings_path", return_value=settings_file),
+            patch("dcode.wsl.get_wsl_distro", return_value="Ubuntu"),
         ):
-            from dcode.cli import _ensure_wsl_docker_settings
+            from dcode.wsl import _ensure_wsl_docker_settings
             _ensure_wsl_docker_settings()
 
         # File content byte-identical — no rewrite happened.
@@ -278,10 +278,10 @@ class TestEnsureWslDockerSettings:
         settings_file.write_text(original)
 
         with (
-            patch("dcode.cli._get_windows_vscode_settings_path", return_value=settings_file),
-            patch("dcode.cli.get_wsl_distro", return_value="Ubuntu"),
+            patch("dcode.wsl._get_windows_vscode_settings_path", return_value=settings_file),
+            patch("dcode.wsl.get_wsl_distro", return_value="Ubuntu"),
         ):
-            from dcode.cli import _ensure_wsl_docker_settings
+            from dcode.wsl import _ensure_wsl_docker_settings
             _ensure_wsl_docker_settings()
 
         new_text = settings_file.read_text()
@@ -299,10 +299,10 @@ class TestEnsureWslDockerSettings:
         settings_file.write_text(original)
 
         with (
-            patch("dcode.cli._get_windows_vscode_settings_path", return_value=settings_file),
-            patch("dcode.cli.get_wsl_distro", return_value="Ubuntu"),
+            patch("dcode.wsl._get_windows_vscode_settings_path", return_value=settings_file),
+            patch("dcode.wsl.get_wsl_distro", return_value="Ubuntu"),
         ):
-            from dcode.cli import _ensure_wsl_docker_settings
+            from dcode.wsl import _ensure_wsl_docker_settings
             _ensure_wsl_docker_settings()
 
         # File untouched.
@@ -311,8 +311,8 @@ class TestEnsureWslDockerSettings:
         assert "dev.containers.executeInWSL" in capsys.readouterr().err
 
     def test_falls_back_to_hint_when_path_not_found(self, capsys):
-        with patch("dcode.cli._get_windows_vscode_settings_path", return_value=None):
-            from dcode.cli import _ensure_wsl_docker_settings
+        with patch("dcode.wsl._get_windows_vscode_settings_path", return_value=None):
+            from dcode.wsl import _ensure_wsl_docker_settings
             _ensure_wsl_docker_settings()
 
         assert "dev.containers.executeInWSL" in capsys.readouterr().err
@@ -416,8 +416,8 @@ class TestRunDcodeWorktree:
         dc_dir.mkdir()
         (dc_dir / "devcontainer.json").write_text('{"name": "test"}')
 
-        with patch("dcode.cli.subprocess.run", return_value=_ok()) as mock_run:
-            from dcode.cli import run_dcode
+        with patch("dcode.core.subprocess.run", return_value=_ok()) as mock_run:
+            from dcode.core import run_dcode
             run_dcode(str(worktree))
 
         args = mock_run.call_args[0][0]
@@ -433,8 +433,8 @@ class TestRunDcodeWorktree:
         dc_dir.mkdir()
         (dc_dir / "devcontainer.json").write_text('{"name": "test"}')
 
-        with patch("dcode.cli.subprocess.run", return_value=_ok()) as mock_run:
-            from dcode.cli import run_dcode
+        with patch("dcode.core.subprocess.run", return_value=_ok()) as mock_run:
+            from dcode.core import run_dcode
             run_dcode(str(worktree))
 
         uri = mock_run.call_args[0][0][2]
@@ -455,8 +455,8 @@ class TestRunDcodeWorktree:
             wt.mkdir(parents=True)
             (wt / ".git").write_text(f"gitdir: ../../.git/worktrees/{name}\n")
 
-            with patch("dcode.cli.subprocess.run", return_value=_ok()) as mock_run:
-                from dcode.cli import run_dcode
+            with patch("dcode.core.subprocess.run", return_value=_ok()) as mock_run:
+                from dcode.core import run_dcode
                 run_dcode(str(wt))
             uris.append(mock_run.call_args[0][0][2])
 
@@ -472,8 +472,8 @@ class TestRunDcodeWorktree:
     def test_worktree_falls_back_when_no_devcontainer_in_main_repo(self, tmp_path):
         main_repo, worktree = _make_worktree(tmp_path)
 
-        with patch("dcode.cli.subprocess.run", return_value=_ok()) as mock_run:
-            from dcode.cli import run_dcode
+        with patch("dcode.core.subprocess.run", return_value=_ok()) as mock_run:
+            from dcode.core import run_dcode
             run_dcode(str(worktree))
 
         args = mock_run.call_args[0][0]
@@ -485,8 +485,8 @@ class TestRunDcodeWorktree:
         dc_dir.mkdir()
         (dc_dir / "devcontainer.json").write_text('{"workspaceFolder": "/workspace"}')
 
-        with patch("dcode.cli.subprocess.run", return_value=_ok()) as mock_run:
-            from dcode.cli import run_dcode
+        with patch("dcode.core.subprocess.run", return_value=_ok()) as mock_run:
+            from dcode.core import run_dcode
             run_dcode(str(worktree))
 
         uri = mock_run.call_args[0][0][2]
