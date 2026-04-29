@@ -4,7 +4,7 @@ description = "Open folders in VS Code devcontainers from the CLI"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = ["json5"]
+dependencies = ["json5", "rich>=13.0"]
 dynamic = ["version"]
 
 [project.urls]

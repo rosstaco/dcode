@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -679,6 +680,43 @@ class TestRunDoctor:
         assert captured["path"] == tmp_path.resolve()
 
 
+
+
+# ---------------------------------------------------------------------------
+# No-ANSI rendering when NO_COLOR is set
+# ---------------------------------------------------------------------------
+
+
+_ANSI_RE = re.compile(r"\x1b\[")
+
+
+def test_run_doctor_no_color_emits_no_ansi(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    with (
+        patch("dcode.doctor.shutil.which", return_value="/u/x"),
+        patch("dcode.doctor.is_wsl", return_value=False),
+        patch.multiple(
+            "dcode.doctor",
+            check_editor=lambda: ("ok", "e", None),
+            check_extension=lambda: ("ok", "x", None),
+            check_docker=lambda: ("warn", "d", "h"),
+            check_git=lambda: ("ok", "g", None),
+            check_devcontainer=lambda *a: ("ok", "dc", None),
+            check_devcontainer_parses=lambda *a: ("ok", "p", None),
+            check_worktree=lambda *a: ("ok", "wt", None),
+            check_version=lambda: ("ok", "v", None),
+            check_install_method=lambda: ("ok", "i", None),
+        ),
+    ):
+        doctor.run_doctor(tmp_path)
+    err = capsys.readouterr().err
+    assert "dcode doctor:" in err
+    assert _ANSI_RE.search(err) is None, f"ANSI escapes leaked: {err!r}"
+
+
+# Need re for the ANSI regex
+
 # Suppress unused import warning
 _ = pytest
 _ = Path
+

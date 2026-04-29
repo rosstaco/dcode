@@ -213,3 +213,96 @@ was running at validation time (`docker daemon reachable (29.4.0)`).
 ### Test count
 
 Before commit 4: 91 passed. After: 154 passed (+63). Ruff clean.
+
+## Rich UI validation (prettify-with-rich)
+
+Added `rich>=13.0` runtime dep. New module `src/dcode/_rich.py` centralizes
+Console construction (`stderr=True, highlight=False`; pins `width=200` when
+stderr is non-TTY so substring assertions and CI logs don't soft-wrap).
+
+`doctor.py` now groups checks into 6 sections (Editor/Container/Git/WSL/
+Workspace/dcode) rendered with `console.rule`, status glyphs (✓/⚠/✗/-/•),
+indented dim hint lines, and a colored summary count. `render_plan` now
+emits a `Panel` (cyan border) with a `Table.grid` of label→value rows.
+`_emit_check` uses `rich.text.Text.append` (not markup strings) so check
+messages and hints can contain `[`, `]`, etc. without confusing rich's
+markup parser.
+
+`update.py` `run_update_check` now renders a cyan `Panel` titled
+"dcode update" with color-coded local version (green/cyan/yellow), dim
+latest tag, dim OSC-8 link to the release URL, and a status line.
+Exit codes preserved (0/1/2). `run_update` (the actual upgrade) is
+unchanged — still streams `uv tool upgrade dcode` directly.
+
+Both `run_doctor` and `run_update_check` accept an optional `console:
+Console | None` for tests; `None` → `get_console()`. Network-error path in
+`run_update_check` prints a single `[bold red]` line and returns 2.
+
+### Captured output (NO_COLOR=1)
+
+`uv run python -m dcode doctor` (in this repo, no devcontainer):
+
+```
+Editor ──────────────────────────...
+⚠ VS Code editor: code (code-insiders not on PATH)
+      ↳ hint: install VS Code Insiders or run "Shell Command: Install 'code-insiders' command" from the Command Palette
+✓ Dev Containers extension: ms-vscode-remote.remote-containers (code)
+Container ───────────────────────...
+✓ Container runtime: docker daemon reachable (29.4.0)
+Git ─────────────────────────────...
+✓ git: /opt/homebrew/bin/git
+WSL ─────────────────────────────...
+✓ WSL: not running in WSL (skipping WSL-specific checks)
+Workspace ───────────────────────...
+⚠ devcontainer: none found in /Users/rossmiles/repos/rosstaco/dcode — dcode will open the folder directly without a container
+      ↳ hint: add .devcontainer/devcontainer.json to enable container support
+- devcontainer.json: no file to parse
+✓ worktree: target is a regular git repo (or non-repo)
+dcode ───────────────────────────...
+✓ dcode version: 0.4.2.dev13+g616bf6684.d20260429 (ahead of latest release v0.4.2)
+✓ install method: uv tool (upgradable via "dcode update")
+
+dcode doctor: 7 ok, 2 warn, 0 fail
+
+╭─ Plan for /Users/rossmiles/repos/rosstaco/dcode ────────────...
+│ No devcontainer found — would open ... in code directly.    ...
+╰─────────────────────────────────────────────────────────────...
+```
+
+`uv run python -m dcode update --check`:
+
+```
+╭─ dcode update ───────────────────────────────────────────────...
+│ local:   0.4.2.dev13+g616bf6684.d20260429                     ...
+│ latest:  v0.4.2                                               ...
+│ release: https://github.com/rosstaco/dcode/releases/tag/v0.4.2 ...
+│                                                               ...
+│ ahead of the latest release                                   ...
+╰──────────────────────────────────────────────────────────────...
+```
+
+### Sanity checks
+
+| Scenario | Result |
+|----------|--------|
+| Default TTY → colored, sectioned, panels render | ✓ |
+| `NO_COLOR=1` → no ANSI escapes (verified by `re.search(r"\x1b\[", err)` test) | ✓ |
+| Piped stderr (non-TTY) → no ANSI escapes (rich auto-detects) | ✓ |
+| `COLUMNS=80` real TTY → panels fit to 80 cols, no overflow | ✓ |
+| `dcode doctor /tmp/dctest` with devcontainer → KV table inside Plan panel | ✓ |
+| Network error path → single `[bold red]` line, rc=2 | ✓ |
+| Exit codes unchanged (0 ok, 1 fail/behind, 2 network) | ✓ |
+
+### Tests
+
+154 baseline + 2 new (`test_run_doctor_no_color_emits_no_ansi`,
+`test_run_update_check_no_color_emits_no_ansi`) = **156 passing**, ruff clean.
+
+No deviations from the prettify-with-rich task spec. The only baseline
+change to behavior: the `WSL: not running in WSL` row now appears under
+its own "WSL" rule section header (it used to be a bare line), and the
+Plan content is wrapped in a Panel rather than printed under a bare
+`Plan for <target>:` heading. Substrings tested against (`MAIN repo`,
+`already correct`, `would patch`, `Windows UNC path`, `URI:`,
+`vscode-remote`, `also available`, `code" not on PATH`, etc.) are all
+preserved.

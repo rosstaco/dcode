@@ -7,9 +7,14 @@ import shutil
 import subprocess
 import sys
 
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.text import Text
+
 import dcode
 
 from . import version_check
+from ._rich import get_console
 
 _DCODE_LINE = re.compile(r"^dcode\s+v\d")
 
@@ -64,31 +69,50 @@ def run_update() -> int:
     return result.returncode
 
 
-def run_update_check() -> int:
+def run_update_check(console: Console | None = None) -> int:
     """Driver for ``dcode update --check``."""
+    cons = console or get_console()
     local = dcode.__version__
     try:
         info = version_check.get_latest_release()
     except version_check.NetworkError as exc:
-        print(f"dcode update: could not reach github.com ({exc})", file=sys.stderr)
+        cons.print(f"[bold red]dcode update: could not reach github.com ({exc})[/]")
         return 2
 
     latest_tag = info["tag_name"]
     url = info["html_url"]
     cmp = version_check.compare_versions(local, latest_tag.lstrip("v"))
-
-    print(f"local:   {local}", file=sys.stderr)
-    print(f"latest:  {latest_tag}", file=sys.stderr)
-    print(f"release: {url}", file=sys.stderr)
+    _, local_is_dev = version_check.parse_version(local)
 
     if cmp < 0:
-        print("update available — run `dcode update`", file=sys.stderr)
-        return 1
-    # Equal-or-ahead: distinguish dev builds (same or higher numeric prefix
-    # but with a dev/post suffix) from a clean released build.
-    _, local_is_dev = version_check.parse_version(local)
-    if cmp > 0 or local_is_dev:
-        print("dcode is ahead of the latest release", file=sys.stderr)
-        return 0
-    print("dcode is up to date", file=sys.stderr)
-    return 0
+        local_style = "yellow"
+        status_line = Text.from_markup(
+            "[yellow]update available — run `dcode update`[/]"
+        )
+        rc = 1
+    elif cmp > 0 or local_is_dev:
+        local_style = "cyan"
+        status_line = Text.from_markup("[cyan]ahead of the latest release[/]")
+        rc = 0
+    else:
+        local_style = "green"
+        status_line = Text.from_markup("[green]up to date[/]")
+        rc = 0
+
+    body = Group(
+        Text.from_markup(f"[bold]local:[/]   [{local_style}]{local}[/]"),
+        Text.from_markup(f"[bold]latest:[/]  [dim]{latest_tag}[/]"),
+        Text.from_markup(f"[bold]release:[/] [dim][link={url}]{url}[/link][/]"),
+        Text(""),
+        status_line,
+    )
+    cons.print(
+        Panel(
+            body,
+            title="dcode update",
+            title_align="left",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+    return rc

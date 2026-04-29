@@ -211,5 +211,20 @@ def test_run_update_check_network_error(capsys):
     assert "could not reach" in err
 
 
+def test_run_update_check_no_color_emits_no_ansi(capsys, monkeypatch):
+    import re
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    with (
+        patch.object(update, "dcode") as mock_dcode,
+        patch.object(update.version_check, "get_latest_release", return_value=_RELEASE),
+    ):
+        mock_dcode.__version__ = "0.4.2"
+        run_update_check()
+    err = capsys.readouterr().err
+    assert "up to date" in err
+    assert re.search(r"\x1b\[", err) is None, f"ANSI escapes leaked: {err!r}"
+
+
 # Reference pytest so isort/F401 stays quiet if it ever drops.
 _ = pytest
