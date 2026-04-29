@@ -606,18 +606,20 @@ _SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-def _emit_check(console: Console, result: CheckResult) -> None:
+def _check_renderables(result: CheckResult) -> list[RenderableType]:
+    """Build the renderable line(s) for a single check (status + optional hint)."""
     status, message, hint = result
     glyph, style = STATUS_STYLES.get(status, STATUS_STYLES["info"])
     line = Text()
     line.append(glyph, style=style)
     line.append(" ")
     line.append(message)
-    console.print(line)
+    out: list[RenderableType] = [line]
     if hint and status in ("warn", "fail"):
-        hint_line = Text("      ↳ hint: ", style="dim")
+        hint_line = Text("  ↳ hint: ", style="dim")
         hint_line.append(hint, style="dim")
-        console.print(hint_line)
+        out.append(hint_line)
+    return out
 
 
 def run_doctor(path: Path, console: Console | None = None) -> int:
@@ -659,9 +661,18 @@ def run_doctor(path: Path, console: Console | None = None) -> int:
             section_results.extend(by_id.get(cid, []))
         if not section_results:
             continue
-        cons.rule(f"[bold]{section_title}", align="left", style="cyan")
+        body: list[RenderableType] = []
         for r in section_results:
-            _emit_check(cons, r)
+            body.extend(_check_renderables(r))
+        cons.print(
+            Panel(
+                Group(*body),
+                title=f"[bold]{section_title}[/]",
+                title_align="left",
+                border_style="cyan",
+                padding=(0, 1),
+            )
+        )
 
     # Summary
     all_results = [r for rs in by_id.values() for r in rs]
