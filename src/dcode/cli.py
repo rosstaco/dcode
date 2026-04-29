@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from dcode.core import run_dcode
+from dcode.doctor import run_doctor
 from dcode.update import run_update, run_update_check
 
-_SUBCOMMANDS = ("update",)
+_SUBCOMMANDS = ("doctor", "update")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -17,8 +19,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Open a folder in a VS Code devcontainer.\n"
             "\n"
-            "`dcode update` always runs the update subcommand. To open a folder "
-            "literally named 'update', run `dcode ./update`."
+            "`dcode doctor` and `dcode update` always run their respective subcommands. "
+            "To open a folder literally named 'doctor' or 'update', "
+            "run `dcode ./doctor` or `dcode ./update`."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -29,6 +32,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="use VS Code Insiders",
     )
     subparsers = parser.add_subparsers(dest="command", required=False, metavar="COMMAND")
+
+    p_doctor = subparsers.add_parser(
+        "doctor",
+        help="diagnose the local environment for dcode",
+        description="Diagnose the local environment for dcode and report issues.",
+    )
+    p_doctor.add_argument(
+        "doctor_path",
+        nargs="?",
+        default=None,
+        metavar="path",
+        help="directory to inspect (default: current directory)",
+    )
 
     p_update = subparsers.add_parser(
         "update",
@@ -79,6 +95,10 @@ def main() -> None:
         legacy.add_argument("path", nargs="?", default=".")
         args = legacy.parse_args(argv)
         args.command = None
+
+    if args.command == "doctor":
+        path = Path(args.doctor_path) if args.doctor_path else Path.cwd()
+        sys.exit(run_doctor(path))
 
     if args.command == "update":
         if args.check:

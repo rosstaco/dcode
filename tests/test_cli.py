@@ -78,3 +78,48 @@ class TestDispatch:
             cli.main()
         m_run.assert_called_once_with("./update", insiders=False)
         m_upd.assert_not_called()
+
+    def test_doctor_subcommand_calls_run_doctor(self, monkeypatch, tmp_path):
+        from pathlib import Path
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("sys.argv", ["dcode", "doctor"])
+        with (
+            patch("dcode.cli.run_doctor", return_value=0) as m_doc,
+            patch("dcode.cli.run_dcode") as m_run,
+            pytest.raises(SystemExit) as exc,
+        ):
+            cli.main()
+        assert exc.value.code == 0
+        m_doc.assert_called_once_with(Path.cwd())
+        m_run.assert_not_called()
+
+    def test_doctor_with_path(self, monkeypatch, tmp_path):
+        from pathlib import Path
+
+        monkeypatch.setattr("sys.argv", ["dcode", "doctor", str(tmp_path)])
+        with (
+            patch("dcode.cli.run_doctor", return_value=0) as m_doc,
+            pytest.raises(SystemExit),
+        ):
+            cli.main()
+        m_doc.assert_called_once_with(Path(str(tmp_path)))
+
+    def test_doctor_exit_code_forwarded(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["dcode", "doctor"])
+        with (
+            patch("dcode.cli.run_doctor", return_value=1),
+            pytest.raises(SystemExit) as exc,
+        ):
+            cli.main()
+        assert exc.value.code == 1
+
+    def test_path_named_doctor_workaround(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["dcode", "./doctor"])
+        with (
+            patch("dcode.cli.run_dcode") as m_run,
+            patch("dcode.cli.run_doctor") as m_doc,
+        ):
+            cli.main()
+        m_run.assert_called_once_with("./doctor", insiders=False)
+        m_doc.assert_not_called()
