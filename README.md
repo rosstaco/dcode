@@ -26,6 +26,59 @@ dcode -i .
 
 If the folder has no `.devcontainer/devcontainer.json`, falls back to plain `code .`.
 
+## 🛠 Commands
+
+### `dcode <path>`
+
+Open `<path>` (default: current directory) in VS Code via the configured devcontainer.
+Exit code is forwarded from the spawned editor.
+
+### `dcode doctor [path]`
+
+Diagnose the local environment for dcode and print a "what would `dcode <path>` do here?"
+plan summary. Read-only — never patches `settings.json` or spawns the editor.
+
+Checks: VS Code editor on PATH, Dev Containers extension, Docker daemon, git, WSL setup
+(distro, Windows-side `settings.json`, `dev.containers.executeInWSL`), devcontainer
+discovery + parse, worktree sanity, dcode version vs latest GitHub release, install method.
+
+```bash
+dcode doctor              # inspect current directory
+dcode doctor /some/path   # inspect a specific path
+```
+
+Exit codes:
+
+- `0` — no failing checks (warnings allowed)
+- `1` — one or more failing checks
+
+### `dcode update`
+
+Upgrade the installed `dcode` tool via `uv tool upgrade dcode`. Exit code is forwarded
+from `uv`. Returns `1` if `uv` is not on PATH or if `dcode` was not installed via
+`uv tool`.
+
+### `dcode update --check`
+
+Check for an available update without installing it. Prints local version, latest
+GitHub release, and the release URL.
+
+Exit codes:
+
+- `0` — up to date (or local version is ahead, e.g. a dev build)
+- `1` — a newer release is available
+- `2` — network or GitHub API error
+
+### Naming-collision workaround
+
+`doctor` and `update` are subcommands, so `dcode doctor` and `dcode update` always
+invoke them. To open a folder literally named `doctor` or `update`, prefix the path:
+
+```bash
+dcode ./doctor
+dcode "$(pwd)/update"
+```
+
 ## 🌳 Git worktrees
 
 When you run `dcode .` inside a git worktree, it automatically detects the main repo, finds the devcontainer config there, and opens the worktree folder inside the same container. This means all worktrees share a single devcontainer instance — same extensions, same Copilot context, multiple VS Code windows. 🪟🪟🪟
