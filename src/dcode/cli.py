@@ -10,7 +10,7 @@ from dcode.core import run_dcode
 from dcode.doctor import run_doctor
 from dcode.update import run_update, run_update_check
 
-_SUBCOMMANDS = ("doctor", "update")
+_SUBCOMMANDS = ("doctor", "update", "shell")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -19,9 +19,10 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Open a folder in a VS Code devcontainer.\n"
             "\n"
-            "`dcode doctor` and `dcode update` always run their respective subcommands. "
-            "To open a folder literally named 'doctor' or 'update', "
-            "run `dcode ./doctor` or `dcode ./update`."
+            "`dcode doctor`, `dcode update`, and `dcode shell` always run their "
+            "respective subcommands. To open a folder literally named "
+            "'doctor', 'update', or 'shell', run `dcode ./doctor`, "
+            "`dcode ./update`, or `dcode ./shell`."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -57,6 +58,37 @@ def _build_parser() -> argparse.ArgumentParser:
         help="check for an available update without installing it",
     )
 
+    p_shell = subparsers.add_parser(
+        "shell",
+        help="Open a shell in the project's running devcontainer",
+        description=(
+            "Open an interactive shell inside the running devcontainer for "
+            "the project at `path`. Mirrors VS Code's integrated terminal: "
+            "respects terminal profile settings (workspace > devcontainer > "
+            "user), forwards the SSH agent socket when available, runs as "
+            "`remoteUser`/`containerUser` from devcontainer.json. Requires "
+            "an interactive terminal. To open a folder literally named "
+            "'shell', use `dcode ./shell`."
+        ),
+    )
+    p_shell.add_argument(
+        "shell_path",
+        nargs="?",
+        default=".",
+        metavar="path",
+        help="project folder (default: current directory)",
+    )
+    p_shell.add_argument(
+        "--shell",
+        default=None,
+        dest="shell_override",
+        metavar="EXECUTABLE",
+        help=(
+            "literal shell executable to use (overrides VS Code settings); "
+            "no shell-style argument splitting"
+        ),
+    )
+
     parser.add_argument(
         "path",
         nargs="?",
@@ -85,6 +117,7 @@ def _looks_like_subcommand(argv: list[str]) -> bool:
 
 def main() -> None:
     argv = sys.argv[1:]
+    parser: argparse.ArgumentParser | None = None
     if _looks_like_subcommand(argv):
         parser = _build_parser()
         args = parser.parse_args(argv)
@@ -104,5 +137,18 @@ def main() -> None:
         if args.check:
             sys.exit(run_update_check())
         sys.exit(run_update())
+
+    if args.command == "shell":
+        shell_override = args.shell_override
+        if shell_override is not None and (
+            shell_override.strip() != shell_override or any(c.isspace() for c in shell_override)
+        ):
+            assert parser is not None
+            parser.error(
+                "--shell must be a single executable path or name (no arguments); "
+                "use VS Code terminal profile args for that"
+            )
+        from dcode.shell import run_shell
+        sys.exit(run_shell(args.shell_path, insiders=args.insiders, shell_override=shell_override))
 
     run_dcode(args.path, insiders=args.insiders)
