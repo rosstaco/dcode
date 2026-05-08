@@ -54,7 +54,7 @@ def build_uri_wsl(host_path: str, workspace_folder: str) -> str:
     return f"vscode-remote://dev-container+{hex_payload}{workspace_folder}"
 
 
-def _get_windows_vscode_settings_path(insiders: bool = False) -> Path | None:
+def get_windows_vscode_settings_path(insiders: bool = False) -> Path | None:
     """Find the Windows-side VS Code settings.json from WSL."""
     try:
         result = subprocess.run(
@@ -205,3 +205,7 @@ def _print_wsl_hint() -> None:
         '  "dev.containers.executeInWSLDistro": "<your-distro>"',
         file=sys.stderr,
     )
+
+
+# Backwards-compatible alias for the previously-private helper.
+_get_windows_vscode_settings_path = get_windows_vscode_settings_path

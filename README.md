@@ -33,6 +33,77 @@ If the folder has no `.devcontainer/devcontainer.json`, falls back to plain `cod
 Open `<path>` (default: current directory) in VS Code via the configured devcontainer.
 Exit code is forwarded from the spawned editor.
 
+### `dcode shell`
+
+Open an interactive shell inside the project's running devcontainer.
+
+```bash
+dcode shell                # current directory
+dcode shell ./my-project   # specific path
+dcode shell --shell zsh    # explicit shell executable (overrides settings)
+```
+
+Shell selection priority (highest first):
+
+1. `--shell` CLI flag (literal executable; no argument parsing)
+2. Workspace `<workspace>/.vscode/settings.json`:
+   `terminal.integrated.defaultProfile.linux` plus the matching
+   `terminal.integrated.profiles.linux` entry
+3. `devcontainer.json` `customizations.vscode.settings` with the same keys
+4. Host user-level VS Code settings, such as `~/Library/Application Support/Code/User/settings.json`
+   on macOS, `~/.config/Code/User/settings.json` on Linux, or Windows-side
+   settings via the WSL bridge
+5. Container login shell from `getent passwd <user>` (`nologin` and `false` are rejected)
+6. Fallback: `/bin/bash`, then `/bin/sh`
+
+`dcode shell` always reads the `.linux` terminal settings because devcontainers
+run Linux, even on macOS and WSL hosts. Profile `args` and `env` are honored;
+if a profile `path` is a list, the first entry is used. `${...}` substitution in
+profile values is not resolved in this version, so those values are passed
+through verbatim with a warning.
+
+SSH agent forwarding works automatically when VS Code is open and connected to
+the devcontainer. `dcode shell` detects the VS Code relay socket at
+`/tmp/vscode-ssh-auth-*.sock` and sets `SSH_AUTH_SOCK` on `docker exec`. If no
+socket is found, it prints a hint to open the project in VS Code first.
+
+The shell runs as `remoteUser` from `devcontainer.json` when set, then
+`containerUser`, otherwise the container image's `USER` applies.
+
+The working directory matches the URI logic: `<workspaceFolder>/<worktree-relative-path>`
+for worktrees, otherwise `<workspaceFolder>`. The path is probed with `test -d`;
+if it does not exist, `dcode shell` falls back to the base `<workspaceFolder>`
+with a warning, or omits `-w` entirely if that is missing too.
+
+Limitations:
+
+- **GPG agent forwarding is not yet supported.** Commit signing inside the shell
+  will not work unless you've configured your own GPG forwarding via
+  `containerEnv` and a bind mount.
+- **`remoteEnv` is not applied.** The environment may differ from VS Code's
+  integrated terminal; a warning is printed when `remoteEnv` is present in
+  `devcontainer.json`.
+- **Variable substitution** (`${env:VAR}`, `${localEnv:VAR}`) in terminal
+  profile values is not resolved.
+- **Devcontainer config inheritance** (`extends`, image-label metadata, Docker
+  Compose service `user`) is not merged; only the raw `devcontainer.json` file
+  is read. For complex setups, shell selection may differ from VS Code's
+  resolved view.
+- **Requires an interactive terminal.** `dcode shell` exits with an error when
+  stdin or stdout is not a TTY, such as in piped or scripted contexts.
+
+Common errors:
+
+- No `devcontainer.json`: exits non-zero and points you at `dcode doctor`.
+- Container not running: no matching devcontainer was found; open the project in
+  VS Code first.
+- Container stopped: run `dcode <path>` to start it.
+- Multiple matching containers: clean up the duplicate containers listed in the
+  error.
+- Docker not available: install/start Docker or Docker Desktop and try again.
+
+To open a folder literally named `shell`, run `dcode ./shell`.
+
 ### `dcode doctor [path]`
 
 Diagnose the local environment for dcode and print a "what would `dcode <path>` do here?"
@@ -71,10 +142,12 @@ Exit codes:
 
 ### Naming-collision workaround
 
-`doctor` and `update` are subcommands, so `dcode doctor` and `dcode update` always
-invoke them. To open a folder literally named `doctor` or `update`, prefix the path:
+`shell`, `doctor`, and `update` are subcommands, so `dcode shell`, `dcode doctor`,
+and `dcode update` always invoke them. To open a folder literally named `shell`,
+`doctor`, or `update`, prefix the path:
 
 ```bash
+dcode ./shell
 dcode ./doctor
 dcode "$(pwd)/update"
 ```
