@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/rosstaco/dcode/compare/v0.4.3...v0.5.0) (2026-05-08)
+
+
+### Features
+
+* add `dcode shell` subcommand ([9717596](https://github.com/rosstaco/dcode/commit/971759692ce0cc918a121e60e7bdfbc896d49126))
+* add `dcode shell` subcommand ([c50d567](https://github.com/rosstaco/dcode/commit/c50d567a130be92cbc9f63c6c90918dbb8b107e4))
+
 ## [0.4.3](https://github.com/rosstaco/dcode/compare/v0.4.2...v0.4.3) (2026-04-30)
 
 
