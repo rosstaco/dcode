@@ -174,6 +174,51 @@ class TestCheckGit:
 
 
 # ---------------------------------------------------------------------------
+# check_devcontainer_cli
+# ---------------------------------------------------------------------------
+
+
+class TestCheckDevcontainerCli:
+    def test_present_with_version(self):
+        with (
+            patch(
+                "dcode.doctor.devcontainer_cli.find_cli",
+                return_value=Path("/u/local/bin/devcontainer"),
+            ),
+            patch(
+                "dcode.doctor.devcontainer_cli.cli_version",
+                return_value="0.86.0",
+            ),
+        ):
+            status, msg, hint = doctor.check_devcontainer_cli()
+        assert status == "ok"
+        assert "/u/local/bin/devcontainer" in msg
+        assert "0.86.0" in msg
+        assert hint is None
+
+    def test_present_without_version_still_ok(self):
+        with (
+            patch(
+                "dcode.doctor.devcontainer_cli.find_cli",
+                return_value=Path("/x/devcontainer"),
+            ),
+            patch("dcode.doctor.devcontainer_cli.cli_version", return_value=None),
+        ):
+            status, msg, _ = doctor.check_devcontainer_cli()
+        assert status == "ok"
+        assert "/x/devcontainer" in msg
+
+    def test_missing_warns_with_install_hint(self):
+        with patch("dcode.doctor.devcontainer_cli.find_cli", return_value=None):
+            status, msg, hint = doctor.check_devcontainer_cli()
+        assert status == "warn"
+        assert "not on PATH" in msg
+        assert hint is not None
+        assert "curl" in hint
+        assert "install.sh" in hint
+
+
+# ---------------------------------------------------------------------------
 # check_wsl + sub-checks
 # ---------------------------------------------------------------------------
 
@@ -571,6 +616,7 @@ class TestRunDoctor:
                 check_editor=lambda: ("ok", "e", None),
                 check_extension=lambda: ("ok", "x", None),
                 check_docker=lambda: ("ok", "d", None),
+                check_devcontainer_cli=lambda: ("ok", "dc-cli", None),
                 check_git=lambda: ("ok", "g", None),
                 check_devcontainer=lambda *a: ("warn", "w", "h"),
                 check_devcontainer_parses=lambda *a: ("skip", "s", None),
@@ -594,6 +640,7 @@ class TestRunDoctor:
                 check_editor=lambda: ("ok", "e", None),
                 check_extension=lambda: ("ok", "x", None),
                 check_docker=lambda: ("fail", "d", "h"),
+                check_devcontainer_cli=lambda: ("ok", "dc-cli", None),
                 check_git=lambda: ("ok", "g", None),
                 check_devcontainer=lambda *a: ("ok", "dc", None),
                 check_devcontainer_parses=lambda *a: ("ok", "p", None),
@@ -617,6 +664,7 @@ class TestRunDoctor:
                 check_editor=lambda: ("ok", "e", None),
                 check_extension=lambda: ("ok", "x", None),
                 check_docker=lambda: ("warn", "d", "h"),
+                check_devcontainer_cli=lambda: ("ok", "dc-cli", None),
                 check_git=lambda: ("warn", "g", "h"),
                 check_devcontainer=lambda *a: ("ok", "dc", None),
                 check_devcontainer_parses=lambda *a: ("ok", "p", None),
@@ -627,7 +675,7 @@ class TestRunDoctor:
         ):
             doctor.run_doctor(tmp_path)
         err = capsys.readouterr().err
-        assert "dcode doctor: 8 ok, 2 warn, 0 fail" in err
+        assert "dcode doctor: 9 ok, 2 warn, 0 fail" in err
 
     def test_plan_failure_does_not_change_exit_code(self, tmp_path, capsys):
         with (
@@ -638,6 +686,7 @@ class TestRunDoctor:
                 check_editor=lambda: ("ok", "e", None),
                 check_extension=lambda: ("ok", "x", None),
                 check_docker=lambda: ("ok", "d", None),
+                check_devcontainer_cli=lambda: ("ok", "dc-cli", None),
                 check_git=lambda: ("ok", "g", None),
                 check_devcontainer=lambda *a: ("ok", "dc", None),
                 check_devcontainer_parses=lambda *a: ("ok", "p", None),
@@ -667,6 +716,7 @@ class TestRunDoctor:
                 check_editor=lambda: ("ok", "e", None),
                 check_extension=lambda: ("ok", "x", None),
                 check_docker=lambda: ("ok", "d", None),
+                check_devcontainer_cli=lambda: ("ok", "dc-cli", None),
                 check_git=lambda: ("ok", "g", None),
                 check_devcontainer=cap,
                 check_devcontainer_parses=lambda *a: ("skip", "p", None),
@@ -700,6 +750,7 @@ def test_run_doctor_no_color_emits_no_ansi(tmp_path, capsys, monkeypatch):
             check_editor=lambda: ("ok", "e", None),
             check_extension=lambda: ("ok", "x", None),
             check_docker=lambda: ("warn", "d", "h"),
+            check_devcontainer_cli=lambda: ("ok", "dc-cli", None),
             check_git=lambda: ("ok", "g", None),
             check_devcontainer=lambda *a: ("ok", "dc", None),
             check_devcontainer_parses=lambda *a: ("ok", "p", None),

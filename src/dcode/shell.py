@@ -19,6 +19,7 @@ from typing import Literal
 
 import json5
 
+from dcode import devcontainer_cli
 from dcode.core import find_devcontainer, get_workspace_folder, resolve_worktree
 from dcode.wsl import _wsl_to_windows_path, get_windows_vscode_settings_path, is_wsl
 
@@ -457,24 +458,106 @@ def probe_workdir(container_id: str, candidate: str, fallback: str) -> str | Non
 # ---------------------------------------------------------------------------
 
 
-def _resolve_exec_user(devcontainer_cfg: dict) -> str | None:
+def _inspect_container_metadata(container_id: str) -> list[dict]:
+    """Read and parse the ``devcontainer.metadata`` label from a container.
+
+    devcontainers/cli writes the merged metadata layers (base image →
+    features → devcontainer.json) onto this label as a JSON array (or, for
+    older/custom images, a single JSON object). This is where ``remoteUser``
+    lives when it comes from a base image like
+    ``mcr.microsoft.com/devcontainers/javascript-node`` rather than the
+    project's ``devcontainer.json``.
+
+    Returns a list of metadata entry dicts (in source-array order). Returns
+    ``[]`` on any failure: missing label, docker error, malformed JSON, or
+    unexpected shape.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                container_id,
+                "--format",
+                '{{ index .Config.Labels "devcontainer.metadata" }}',
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return []
+    if proc.returncode != 0:
+        return []
+    raw = proc.stdout.strip()
+    if not raw or raw == "<no value>":
+        return []
+    try:
+        # The label is generated with JSON.stringify on the devcontainers/cli
+        # side, so strict json is sufficient and more faithful than json5.
+        data = json.loads(raw)
+    except ValueError:
+        return []
+    if isinstance(data, dict):
+        return [data]
+    if isinstance(data, list):
+        return [e for e in data if isinstance(e, dict)]
+    return []
+
+
+def _resolve_exec_user(
+    devcontainer_cfg: dict,
+    metadata_entries: list[dict] | None = None,
+) -> str | None:
+    """Resolve the user to ``docker exec -u`` as.
+
+    Mirrors devcontainers/cli's ``mergeConfiguration`` semantics: ``remoteUser``
+    and ``containerUser`` are each resolved independently with "last entry
+    wins" across the metadata layers, then ``remoteUser`` is preferred over
+    ``containerUser`` (since ``remoteUser`` is what VS Code passes to
+    ``docker exec -u``).
+
+    The local ``devcontainer.json`` is appended as the highest-precedence
+    layer. It is normally already present as the last metadata entry, but
+    this defensive duplication ensures we still pick up an explicit
+    ``remoteUser`` when the container predates the metadata label or the
+    label was stripped.
+    """
+    layers: list[dict] = list(metadata_entries or [])
+    layers.append(devcontainer_cfg or {})
     for key in ("remoteUser", "containerUser"):
-        v = devcontainer_cfg.get(key)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
+        for entry in reversed(layers):
+            v = entry.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
     return None
+
+
+def _prompt_yes_no(question: str, *, default_yes: bool) -> bool:
+    """Prompt the user with a yes/no question on stderr.
+
+    Accepts ``y``/``yes`` (any case), declines on ``n``/``no``. An empty
+    answer follows ``default_yes``. All other inputs decline. Decline
+    paths print ``dcode: aborted`` to stderr.
+    """
+    suffix = "[Y/n]" if default_yes else "[y/N]"
+    sys.stderr.write(f"{question} {suffix} ")
+    sys.stderr.flush()
+    answer = sys.stdin.readline().strip().lower()
+    if answer in ("y", "yes"):
+        return True
+    if answer == "" and default_yes:
+        return True
+    print("dcode: aborted", file=sys.stderr)
+    return False
 
 
 def _prompt_start_stopped(container_id: str, host_path: str | Path) -> bool:
     """Prompt to start a stopped container and run ``docker start`` if accepted."""
-    sys.stderr.write(
-        f"dcode: devcontainer for {host_path} is stopped. Start it now? [Y/n] "
-    )
-    sys.stderr.flush()
-
-    answer = sys.stdin.readline().strip().lower()
-    if answer not in ("", "y", "yes"):
-        print("dcode: aborted", file=sys.stderr)
+    if not _prompt_yes_no(
+        f"dcode: devcontainer for {host_path} is stopped. Start it now?",
+        default_yes=True,
+    ):
         return False
 
     short_id = container_id[:12]
@@ -499,6 +582,73 @@ def _prompt_start_stopped(container_id: str, host_path: str | Path) -> bool:
 
     print("dcode: container started", file=sys.stderr)
     return True
+
+
+def _obtain_or_install_cli() -> Path | None:
+    """Locate the devcontainer CLI, prompting to install if missing.
+
+    Returns the absolute path to the CLI binary on success, or ``None`` if
+    the CLI is not present and the user declined or the install failed
+    (the caller should treat this as a hard failure with a clear hint).
+    """
+    cli = devcontainer_cli.find_cli()
+    if cli is not None:
+        return cli
+
+    print(
+        "dcode: Dev Containers CLI is not installed (the CLI is what builds the "
+        "devcontainer outside of VS Code).",
+        file=sys.stderr,
+    )
+    if not _prompt_yes_no(
+        f"dcode: install the Dev Containers CLI now from "
+        f"{devcontainer_cli.INSTALL_SCRIPT_URL}\n"
+        f"       into {devcontainer_cli.DEFAULT_INSTALL_PREFIX} (no root needed)?",
+        default_yes=False,
+    ):
+        print(
+            f"hint: {devcontainer_cli.install_hint()}\n"
+            "  alternatively, open the project in VS Code first to build the "
+            "container, then re-run dcode shell",
+            file=sys.stderr,
+        )
+        return None
+
+    installed = devcontainer_cli.install_cli()
+    if installed is None:
+        print(
+            f"hint: {devcontainer_cli.install_hint()}",
+            file=sys.stderr,
+        )
+        return None
+    return installed
+
+
+def _build_missing_container(main_repo: Path, devcontainer_path: Path) -> str | None:
+    """Build & start a missing devcontainer via the Dev Containers CLI.
+
+    Returns the new container id on success, or ``None`` after printing an
+    error / hint on failure. Assumes the caller has already confirmed an
+    interactive TTY and gotten user consent to build.
+    """
+    cli = _obtain_or_install_cli()
+    if cli is None:
+        return None
+
+    print(
+        f"dcode: building devcontainer for {main_repo} via {cli}",
+        file=sys.stderr,
+    )
+    container_id, error_log = devcontainer_cli.up(cli, main_repo, devcontainer_path)
+    if container_id is None:
+        print("dcode: devcontainer build failed", file=sys.stderr)
+        if error_log:
+            print(error_log, file=sys.stderr)
+        return None
+
+    short = container_id[:12]
+    print(f"dcode: devcontainer built and started ({short})", file=sys.stderr)
+    return container_id
 
 
 def run_shell(path: str, *, insiders: bool, shell_override: str | None) -> int:
@@ -530,45 +680,7 @@ def run_shell(path: str, *, insiders: bool, shell_override: str | None) -> int:
     workspace_folder = get_workspace_folder(devcontainer_path, main_repo)
 
     lookup = find_container(str(main_repo), str(devcontainer_path))
-    if lookup.state in ("running", "stopped") and not (
-        sys.stdin.isatty() and sys.stdout.isatty()
-    ):
-        if lookup.state == "stopped":
-            print(
-                f"dcode: devcontainer for {main_repo} exists but is stopped — "
-                "run interactively to be prompted to start it, or run "
-                f"`dcode {path}` first",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                "dcode: dcode shell requires an interactive terminal",
-                file=sys.stderr,
-            )
-        return 1
 
-    if lookup.state == "stopped":
-        container_id = lookup.id
-        if container_id is None:  # pragma: no cover - defensive
-            print("dcode: container lookup returned no id", file=sys.stderr)
-            return 1
-        if not _prompt_start_stopped(container_id, main_repo):
-            return 1
-    if lookup.state == "missing":
-        print(
-            f"dcode: no devcontainer found running for {main_repo} — "
-            f"open in VS Code first (`dcode {path}`)",
-            file=sys.stderr,
-        )
-        return 1
-    if lookup.state == "ambiguous":
-        ids = ", ".join(lookup.ids)
-        print(
-            f"dcode: multiple devcontainers match {main_repo}: {ids} — "
-            f"please remove duplicates with `docker rm`",
-            file=sys.stderr,
-        )
-        return 1
     if lookup.state == "docker_unavailable":
         detail = lookup.detail or "unknown error"
         print(
@@ -578,12 +690,71 @@ def run_shell(path: str, *, insiders: bool, shell_override: str | None) -> int:
         )
         return 1
 
-    container_id = lookup.id
-    if container_id is None:  # pragma: no cover - defensive
-        print("dcode: container lookup returned no id", file=sys.stderr)
+    if lookup.state == "ambiguous":
+        ids = ", ".join(lookup.ids)
+        print(
+            f"dcode: multiple devcontainers match {main_repo}: {ids} — "
+            f"please remove duplicates with `docker rm`",
+            file=sys.stderr,
+        )
         return 1
 
-    exec_user = _resolve_exec_user(devcontainer_cfg)
+    is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
+
+    if lookup.state in ("stopped", "missing") and not is_interactive:
+        if lookup.state == "stopped":
+            print(
+                f"dcode: devcontainer for {main_repo} exists but is stopped — "
+                "run interactively to be prompted to start it, or run "
+                f"`dcode {path}` first",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"dcode: no devcontainer is running for {main_repo} — "
+                "run interactively to be prompted to build it, or run "
+                f"`dcode {path}` first",
+                file=sys.stderr,
+            )
+        return 1
+
+    if not is_interactive:
+        # state == "running" but no TTY for an interactive shell.
+        print(
+            "dcode: dcode shell requires an interactive terminal",
+            file=sys.stderr,
+        )
+        return 1
+
+    if lookup.state == "stopped":
+        stopped_id = lookup.id
+        if stopped_id is None:  # pragma: no cover - defensive
+            print("dcode: container lookup returned no id", file=sys.stderr)
+            return 1
+        if not _prompt_start_stopped(stopped_id, main_repo):
+            return 1
+        container_id: str = stopped_id
+    elif lookup.state == "missing":
+        if not _prompt_yes_no(
+            f"dcode: no devcontainer is running for {main_repo}. "
+            f"Build & start it now?",
+            default_yes=True,
+        ):
+            return 1
+        built = _build_missing_container(main_repo, devcontainer_path)
+        if built is None:
+            return 1
+        container_id = built
+    else:
+        # state == "running"
+        running_id = lookup.id
+        if running_id is None:  # pragma: no cover - defensive
+            print("dcode: container lookup returned no id", file=sys.stderr)
+            return 1
+        container_id = running_id
+
+    metadata_entries = _inspect_container_metadata(container_id)
+    exec_user = _resolve_exec_user(devcontainer_cfg, metadata_entries)
 
     if "remoteEnv" in devcontainer_cfg:
         print(

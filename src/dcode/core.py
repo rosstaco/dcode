@@ -8,6 +8,7 @@ from pathlib import Path
 
 import json5
 
+from dcode._progress import with_spinner
 from dcode.wsl import _ensure_wsl_docker_settings, build_uri_wsl, is_wsl
 
 
@@ -109,6 +110,31 @@ def build_uri(host_path: str, workspace_folder: str) -> str:
     return f"vscode-remote://dev-container+{hex_path}{workspace_folder}"
 
 
+def _launch_editor(argv: list[str], *, label: str) -> int:
+    """Run *argv* (the VS Code launch) under a spinner.
+
+    Output is captured so it doesn't trample the spinner; on a non-zero exit
+    we surface whatever the editor printed so the user sees the actual error.
+    """
+    with with_spinner(label):
+        try:
+            result = subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as exc:
+            print(f"dcode: failed to launch {argv[0]}: {exc}", file=sys.stderr)
+            return 127
+
+    if result.returncode:
+        out = (result.stderr or "").strip() or (result.stdout or "").strip()
+        if out:
+            print(out, file=sys.stderr)
+    return result.returncode
+
+
 def run_dcode(path: str, *, insiders: bool = False) -> None:
     """Open a folder in VS Code, using devcontainer if available."""
     editor = "code-insiders" if insiders else "code"
@@ -125,9 +151,9 @@ def run_dcode(path: str, *, insiders: bool = False) -> None:
         devcontainer = find_devcontainer(target)
 
     if devcontainer is None:
-        result = subprocess.run([editor, str(target)], check=False)
-        if result.returncode:
-            sys.exit(result.returncode)
+        rc = _launch_editor([editor, str(target)], label=f"Launching {editor}...")
+        if rc:
+            sys.exit(rc)
         return
 
     if main_repo is not None:
@@ -144,6 +170,9 @@ def run_dcode(path: str, *, insiders: bool = False) -> None:
     else:
         uri = build_uri(host_path, workspace_folder)
 
-    result = subprocess.run([editor, "--folder-uri", uri], check=False)
-    if result.returncode:
-        sys.exit(result.returncode)
+    rc = _launch_editor(
+        [editor, "--folder-uri", uri],
+        label=f"Launching {editor} in devcontainer...",
+    )
+    if rc:
+        sys.exit(rc)

@@ -13,7 +13,12 @@ from conftest import _make_worktree
 from dcode.shell import (
     ContainerLookup,
     ResolvedShell,
+    _build_missing_container,
+    _inspect_container_metadata,
     _load_jsonc,
+    _obtain_or_install_cli,
+    _prompt_yes_no,
+    _resolve_exec_user,
     detect_login_shell,
     find_container,
     find_ssh_socket,
@@ -455,6 +460,144 @@ class TestDetectLoginShell:
 
 
 # ---------------------------------------------------------------------------
+# _inspect_container_metadata
+# ---------------------------------------------------------------------------
+
+
+class TestInspectContainerMetadata:
+    def test_returns_list_for_array_label(self):
+        label = json.dumps([{"id": "feat"}, {"remoteUser": "node"}])
+        with patch(
+            "dcode.shell.subprocess.run",
+            return_value=_completed(0, label + "\n", ""),
+        ) as m:
+            result = _inspect_container_metadata("cid")
+        assert result == [{"id": "feat"}, {"remoteUser": "node"}]
+        # Verify the docker invocation shape:
+        argv = m.call_args.args[0]
+        assert argv[:3] == ["docker", "inspect", "cid"]
+        assert "--format" in argv
+        fmt = argv[argv.index("--format") + 1]
+        assert "devcontainer.metadata" in fmt
+
+    def test_object_label_wrapped_in_single_entry(self):
+        # Older/custom images may write a JSON object instead of an array.
+        label = json.dumps({"remoteUser": "vscode"})
+        with patch(
+            "dcode.shell.subprocess.run",
+            return_value=_completed(0, label + "\n", ""),
+        ):
+            assert _inspect_container_metadata("cid") == [{"remoteUser": "vscode"}]
+
+    def test_non_dict_array_entries_filtered(self):
+        label = json.dumps([{"a": 1}, "junk", 42, None, {"b": 2}])
+        with patch(
+            "dcode.shell.subprocess.run",
+            return_value=_completed(0, label + "\n", ""),
+        ):
+            assert _inspect_container_metadata("cid") == [{"a": 1}, {"b": 2}]
+
+    def test_missing_label_returns_empty(self):
+        # Docker's --format prints the empty string when the label is absent
+        # (or "<no value>" depending on Docker version).
+        for stdout in ("", "\n", "<no value>\n"):
+            with patch(
+                "dcode.shell.subprocess.run",
+                return_value=_completed(0, stdout, ""),
+            ):
+                assert _inspect_container_metadata("cid") == []
+
+    def test_malformed_json_returns_empty(self):
+        with patch(
+            "dcode.shell.subprocess.run",
+            return_value=_completed(0, "not json at all\n", ""),
+        ):
+            assert _inspect_container_metadata("cid") == []
+
+    def test_top_level_scalar_returns_empty(self):
+        with patch(
+            "dcode.shell.subprocess.run",
+            return_value=_completed(0, '"justastring"\n', ""),
+        ):
+            assert _inspect_container_metadata("cid") == []
+
+    def test_docker_nonzero_returns_empty(self):
+        with patch(
+            "dcode.shell.subprocess.run",
+            return_value=_completed(1, "", "no such container"),
+        ):
+            assert _inspect_container_metadata("cid") == []
+
+    def test_docker_missing_returns_empty(self):
+        with patch(
+            "dcode.shell.subprocess.run",
+            side_effect=FileNotFoundError("docker"),
+        ):
+            assert _inspect_container_metadata("cid") == []
+
+
+# ---------------------------------------------------------------------------
+# _resolve_exec_user
+# ---------------------------------------------------------------------------
+
+
+class TestResolveExecUser:
+    def test_devcontainer_json_remote_user(self):
+        assert _resolve_exec_user({"remoteUser": "vscode"}) == "vscode"
+
+    def test_devcontainer_json_container_user_when_no_remote(self):
+        assert _resolve_exec_user({"containerUser": "vscode"}) == "vscode"
+
+    def test_remote_user_preferred_over_container_user(self):
+        cfg = {"remoteUser": "node", "containerUser": "root"}
+        assert _resolve_exec_user(cfg) == "node"
+
+    def test_metadata_remote_user_used_when_json_empty(self):
+        assert (
+            _resolve_exec_user({}, [{"remoteUser": "node"}]) == "node"
+        )
+
+    def test_devcontainer_json_overrides_metadata(self):
+        # Local devcontainer.json is the highest-precedence layer.
+        cfg = {"remoteUser": "vscode"}
+        meta = [{"remoteUser": "node"}]
+        assert _resolve_exec_user(cfg, meta) == "vscode"
+
+    def test_last_metadata_layer_wins(self):
+        # Mirrors devcontainers/cli mergeConfiguration: reversed().find(...)
+        # — the last entry in the metadata array wins per key.
+        meta = [
+            {"remoteUser": "base"},
+            {"remoteUser": "feature"},
+            {"remoteUser": "final"},
+        ]
+        assert _resolve_exec_user({}, meta) == "final"
+
+    def test_remote_user_in_earlier_layer_beats_container_user_in_later(self):
+        # Per-key independent reverse walk + remoteUser-over-containerUser
+        # precedence: an older remoteUser still wins over a newer
+        # containerUser, matching devcontainers/cli semantics.
+        meta = [
+            {"remoteUser": "node"},
+            {"containerUser": "root"},
+        ]
+        assert _resolve_exec_user({}, meta) == "node"
+
+    def test_blank_or_non_string_values_ignored(self):
+        meta = [
+            {"remoteUser": "  "},
+            {"remoteUser": None},
+            {"remoteUser": 123},
+            {"remoteUser": "vscode"},
+        ]
+        assert _resolve_exec_user({}, meta) == "vscode"
+
+    def test_returns_none_when_nothing_set(self):
+        assert _resolve_exec_user({}, []) is None
+        assert _resolve_exec_user({}) is None
+
+
+# ---------------------------------------------------------------------------
 # find_ssh_socket
 # ---------------------------------------------------------------------------
 
@@ -561,6 +704,7 @@ class _RunShellHarness:
         login_shell: str = "/bin/bash",
         isatty: bool = True,
         execvp_side_effect=None,
+        metadata_entries: list | None = None,
     ):
         self.container_id = container_id
         self.ssh_sock = ssh_sock
@@ -569,12 +713,17 @@ class _RunShellHarness:
         self.login_shell = login_shell
         self.isatty = isatty
         self.execvp = MagicMock(side_effect=execvp_side_effect)
+        self.metadata_entries = metadata_entries if metadata_entries is not None else []
 
     def __enter__(self):
         self._patches = [
             patch(
                 "dcode.shell.find_container",
                 return_value=ContainerLookup(state="running", id=self.container_id),
+            ),
+            patch(
+                "dcode.shell._inspect_container_metadata",
+                return_value=list(self.metadata_entries),
             ),
             patch("dcode.shell.find_ssh_socket", return_value=self.ssh_sock),
             patch("dcode.shell.probe_workdir", return_value=self.workdir),
@@ -628,6 +777,24 @@ class TestRunShell:
             run_shell(str(proj), insiders=False, shell_override=None)
         argv = h.execvp.call_args.args[1]
         assert "-u" not in argv
+
+    def test_remote_user_from_image_metadata_label(self, tmp_path):
+        # devcontainer.json doesn't set remoteUser; it comes from the base
+        # image (e.g. mcr.microsoft.com/devcontainers/javascript-node).
+        proj = _make_project(tmp_path, "{}")
+        with _RunShellHarness(metadata_entries=[{"remoteUser": "node"}]) as h:
+            run_shell(str(proj), insiders=False, shell_override=None)
+        argv = h.execvp.call_args.args[1]
+        i = argv.index("-u")
+        assert argv[i + 1] == "node"
+
+    def test_devcontainer_json_overrides_image_metadata(self, tmp_path):
+        proj = _make_project(tmp_path, '{"remoteUser": "vscode"}')
+        with _RunShellHarness(metadata_entries=[{"remoteUser": "node"}]) as h:
+            run_shell(str(proj), insiders=False, shell_override=None)
+        argv = h.execvp.call_args.args[1]
+        i = argv.index("-u")
+        assert argv[i + 1] == "vscode"
 
     def test_workdir_present(self, tmp_path):
         proj = _make_project(tmp_path)
@@ -794,6 +961,7 @@ class TestRunShellStoppedPrompt:
                 ),
             ),
             patch("dcode.shell.subprocess.run", start),
+            patch("dcode.shell._inspect_container_metadata", return_value=[]),
             patch("dcode.shell.find_ssh_socket", return_value="/host/ssh.sock"),
             patch("dcode.shell.probe_workdir", return_value="/workspaces/proj"),
             patch("dcode.shell.resolve_terminal_profile", return_value=None),
@@ -891,6 +1059,277 @@ class TestRunShellStoppedPrompt:
 
 
 # ---------------------------------------------------------------------------
+# _prompt_yes_no
+# ---------------------------------------------------------------------------
+
+
+class TestPromptYesNo:
+    def _run(self, answer: str, *, default_yes: bool, capsys):
+        with patch("sys.stdin", _TTYStringIO(answer)):
+            return _prompt_yes_no("Q?", default_yes=default_yes)
+
+    def test_y_accepts(self, capsys):
+        assert self._run("y\n", default_yes=True, capsys=capsys) is True
+
+    def test_yes_word_accepts_case_insensitive(self, capsys):
+        assert self._run("YeS\n", default_yes=False, capsys=capsys) is True
+
+    def test_empty_default_yes_accepts(self, capsys):
+        assert self._run("\n", default_yes=True, capsys=capsys) is True
+
+    def test_empty_default_no_declines(self, capsys):
+        assert self._run("\n", default_yes=False, capsys=capsys) is False
+        assert "aborted" in capsys.readouterr().err
+
+    def test_n_declines(self, capsys):
+        assert self._run("n\n", default_yes=True, capsys=capsys) is False
+        assert "aborted" in capsys.readouterr().err
+
+    def test_garbage_declines(self, capsys):
+        assert self._run("maybe\n", default_yes=True, capsys=capsys) is False
+        assert "aborted" in capsys.readouterr().err
+
+    def test_question_and_suffix_on_stderr(self, capsys):
+        with patch("sys.stdin", _TTYStringIO("y\n")):
+            _prompt_yes_no("Build it?", default_yes=True)
+        err = capsys.readouterr().err
+        assert "Build it?" in err
+        assert "[Y/n]" in err
+
+    def test_default_no_renders_lower_y(self, capsys):
+        with patch("sys.stdin", _TTYStringIO("y\n")):
+            _prompt_yes_no("Install?", default_yes=False)
+        assert "[y/N]" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# _obtain_or_install_cli
+# ---------------------------------------------------------------------------
+
+
+class TestObtainOrInstallCli:
+    def test_returns_existing_path_without_prompting(self, capsys):
+        with (
+            patch("dcode.shell.devcontainer_cli.find_cli", return_value=Path("/x/dc")),
+            patch("dcode.shell.devcontainer_cli.install_cli") as install,
+            patch("sys.stdin", _TTYStringIO("")),
+        ):
+            assert _obtain_or_install_cli() == Path("/x/dc")
+        install.assert_not_called()
+        # Nothing should have been prompted.
+        assert "Install" not in capsys.readouterr().err
+
+    def test_declines_install_returns_none_with_hint(self, capsys):
+        with (
+            patch("dcode.shell.devcontainer_cli.find_cli", return_value=None),
+            patch("dcode.shell.devcontainer_cli.install_cli") as install,
+            patch("sys.stdin", _TTYStringIO("n\n")),
+        ):
+            assert _obtain_or_install_cli() is None
+        install.assert_not_called()
+        err = capsys.readouterr().err
+        assert "install" in err.lower()
+        assert "VS Code" in err  # alternative hint
+
+    def test_accepts_install_returns_installed_path(self, capsys):
+        with (
+            patch("dcode.shell.devcontainer_cli.find_cli", return_value=None),
+            patch(
+                "dcode.shell.devcontainer_cli.install_cli",
+                return_value=Path("/home/u/.devcontainers/bin/devcontainer"),
+            ) as install,
+            patch("sys.stdin", _TTYStringIO("y\n")),
+        ):
+            assert _obtain_or_install_cli() == Path(
+                "/home/u/.devcontainers/bin/devcontainer"
+            )
+        install.assert_called_once()
+
+    def test_install_failure_returns_none(self, capsys):
+        with (
+            patch("dcode.shell.devcontainer_cli.find_cli", return_value=None),
+            patch("dcode.shell.devcontainer_cli.install_cli", return_value=None),
+            patch("sys.stdin", _TTYStringIO("y\n")),
+        ):
+            assert _obtain_or_install_cli() is None
+        assert "install" in capsys.readouterr().err.lower()
+
+
+# ---------------------------------------------------------------------------
+# _build_missing_container
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMissingContainer:
+    def test_returns_container_id_on_success(self, tmp_path, capsys):
+        proj = tmp_path / "proj"
+        cfg = tmp_path / "proj/.devcontainer/devcontainer.json"
+        with (
+            patch(
+                "dcode.shell._obtain_or_install_cli",
+                return_value=Path("/x/devcontainer"),
+            ),
+            patch(
+                "dcode.shell.devcontainer_cli.up",
+                return_value=("abc123def456", ""),
+            ) as up,
+        ):
+            cid = _build_missing_container(proj, cfg)
+        assert cid == "abc123def456"
+        up.assert_called_once_with(Path("/x/devcontainer"), proj, cfg)
+        err = capsys.readouterr().err
+        assert "abc123def456"[:12] in err  # short-id printed
+
+    def test_no_cli_returns_none(self, tmp_path):
+        with patch("dcode.shell._obtain_or_install_cli", return_value=None):
+            assert _build_missing_container(tmp_path, tmp_path / "x.json") is None
+
+    def test_up_failure_prints_error_log(self, tmp_path, capsys):
+        with (
+            patch(
+                "dcode.shell._obtain_or_install_cli",
+                return_value=Path("/x/devcontainer"),
+            ),
+            patch(
+                "dcode.shell.devcontainer_cli.up",
+                return_value=(None, "Dockerfile RUN failed: package foo not found"),
+            ),
+        ):
+            cid = _build_missing_container(tmp_path, tmp_path / "x.json")
+        assert cid is None
+        err = capsys.readouterr().err
+        assert "build failed" in err
+        assert "package foo not found" in err
+
+
+# ---------------------------------------------------------------------------
+# run_shell — missing → build flow
+# ---------------------------------------------------------------------------
+
+
+class TestRunShellMissingBuild:
+    def _patches(
+        self,
+        *,
+        answer: str,
+        built_container_id: str | None = "newcid",
+        metadata_entries=None,
+    ):
+        """Patches simulating find_container='missing' + a build outcome."""
+        proj_metadata = list(metadata_entries) if metadata_entries else []
+        return [
+            patch(
+                "dcode.shell.find_container",
+                return_value=ContainerLookup(state="missing"),
+            ),
+            patch(
+                "dcode.shell._build_missing_container",
+                return_value=built_container_id,
+            ),
+            patch(
+                "dcode.shell._inspect_container_metadata",
+                return_value=proj_metadata,
+            ),
+            patch("dcode.shell.find_ssh_socket", return_value="/host/ssh.sock"),
+            patch("dcode.shell.probe_workdir", return_value="/workspaces/proj"),
+            patch("dcode.shell.resolve_terminal_profile", return_value=None),
+            patch("dcode.shell.detect_login_shell", return_value="/bin/bash"),
+            patch("sys.stdin", _TTYStringIO(answer)),
+        ]
+
+    def _enter_all(self, stack, patches):
+        return [stack.enter_context(p) for p in patches]
+
+    def test_accept_build_then_exec(self, tmp_path, monkeypatch, capsys):
+        from contextlib import ExitStack
+
+        proj = _make_project(tmp_path)
+        monkeypatch.setattr("sys.stdout", _TTYStringIO())
+
+        execvp = MagicMock()
+        with ExitStack() as stack:
+            stack.enter_context(patch("dcode.shell.os.execvp", execvp))
+            self._enter_all(
+                stack,
+                self._patches(answer="y\n", built_container_id="newcid"),
+            )
+            rc = run_shell(str(proj), insiders=False, shell_override=None)
+
+        assert rc == 0
+        execvp.assert_called_once()
+        argv = execvp.call_args.args[1]
+        assert "newcid" in argv
+        err = capsys.readouterr().err
+        assert "Build & start it now?" in err
+
+    def test_decline_build_returns_nonzero_no_exec(self, tmp_path, monkeypatch, capsys):
+        proj = _make_project(tmp_path)
+        monkeypatch.setattr("sys.stdout", _TTYStringIO())
+
+        execvp = MagicMock()
+        build = MagicMock()
+        with (
+            patch("dcode.shell.os.execvp", execvp),
+            patch(
+                "dcode.shell.find_container",
+                return_value=ContainerLookup(state="missing"),
+            ),
+            patch("dcode.shell._build_missing_container", build),
+            patch("sys.stdin", _TTYStringIO("n\n")),
+        ):
+            rc = run_shell(str(proj), insiders=False, shell_override=None)
+
+        assert rc != 0
+        execvp.assert_not_called()
+        build.assert_not_called()
+        err = capsys.readouterr().err
+        assert "aborted" in err
+
+    def test_accept_but_build_fails_returns_nonzero(self, tmp_path, monkeypatch):
+        from contextlib import ExitStack
+
+        proj = _make_project(tmp_path)
+        monkeypatch.setattr("sys.stdout", _TTYStringIO())
+
+        execvp = MagicMock()
+        with ExitStack() as stack:
+            stack.enter_context(patch("dcode.shell.os.execvp", execvp))
+            self._enter_all(
+                stack,
+                self._patches(answer="y\n", built_container_id=None),
+            )
+            rc = run_shell(str(proj), insiders=False, shell_override=None)
+
+        assert rc != 0
+        execvp.assert_not_called()
+
+    def test_built_container_metadata_used_for_remote_user(
+        self, tmp_path, monkeypatch
+    ):
+        from contextlib import ExitStack
+
+        proj = _make_project(tmp_path)  # devcontainer.json has no remoteUser
+        monkeypatch.setattr("sys.stdout", _TTYStringIO())
+
+        execvp = MagicMock()
+        with ExitStack() as stack:
+            stack.enter_context(patch("dcode.shell.os.execvp", execvp))
+            self._enter_all(
+                stack,
+                self._patches(
+                    answer="y\n",
+                    built_container_id="newcid",
+                    metadata_entries=[{"remoteUser": "node"}],
+                ),
+            )
+            run_shell(str(proj), insiders=False, shell_override=None)
+
+        argv = execvp.call_args.args[1]
+        i = argv.index("-u")
+        assert argv[i + 1] == "node"
+
+
+# ---------------------------------------------------------------------------
 # run_shell — error paths
 # ---------------------------------------------------------------------------
 
@@ -913,13 +1352,17 @@ class TestRunShellErrors:
         assert rc != 0
         assert "dcode doctor" in capsys.readouterr().err
 
-    def test_state_missing_message(self, tmp_path, capsys):
+    def test_state_missing_non_tty_message(self, tmp_path, capsys, monkeypatch):
         proj = _make_project(tmp_path)
+        monkeypatch.setattr("sys.stdin", _TTYStringIO(isatty=False))
+        monkeypatch.setattr("sys.stdout", _TTYStringIO(isatty=False))
         with self._run_with("missing"):
             rc = run_shell(str(proj), insiders=False, shell_override=None)
         assert rc != 0
         err = capsys.readouterr().err
-        assert "no devcontainer found running" in err
+        assert "no devcontainer is running" in err
+        assert "run interactively to be prompted to build it" in err
+        assert f"dcode {proj}" in err
 
     def test_state_stopped_non_tty_message(self, tmp_path, capsys, monkeypatch):
         proj = _make_project(tmp_path)

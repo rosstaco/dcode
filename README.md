@@ -67,8 +67,59 @@ the devcontainer. `dcode shell` detects the VS Code relay socket at
 `/tmp/vscode-ssh-auth-*.sock` and sets `SSH_AUTH_SOCK` on `docker exec`. If no
 socket is found, it prints a hint to open the project in VS Code first.
 
+### Auto-build: starting a brand-new devcontainer
+
+If you run `dcode shell` in a project whose devcontainer has never been built,
+`dcode shell` will offer to build it for you so you don't have to open VS Code
+first:
+
+```
+dcode: no devcontainer is running for /path/to/proj. Build & start it now? [Y/n]
+```
+
+This uses the official **`@devcontainers/cli`** (the same Node.js CLI VS Code's
+Dev Containers extension drives under the hood) so the resulting container
+carries the same `devcontainer.local_folder`, `devcontainer.config_file`, and
+`devcontainer.metadata` labels VS Code expects — open the project in VS Code
+later and it'll attach to the same container.
+
+If the CLI isn't installed, `dcode shell` will offer to install it:
+
+```
+dcode: install the Dev Containers CLI now from
+       https://raw.githubusercontent.com/devcontainers/cli/main/scripts/install.sh
+       into ~/.devcontainers (no root needed)? [y/N]
+```
+
+This downloads a self-contained install (bundled Node.js runtime included), so
+you don't need a host Node.js install. To install it manually:
+
+```bash
+# Self-contained install (recommended; bundles its own Node.js):
+curl -fsSL https://raw.githubusercontent.com/devcontainers/cli/main/scripts/install.sh | sh
+
+# Or, if you already have Node.js:
+npm install -g @devcontainers/cli
+```
+
+Build progress (Docker layer pulls, feature installation, lifecycle hooks)
+streams live above a pinned spinner so you can watch what the CLI is doing
+without losing the loader UX. The same spinner shows briefly when `dcode .`
+launches VS Code so you always know dcode is doing something.
+
+If you decline the install, `dcode shell` exits with a hint pointing at the
+above commands and at `dcode <path>` (which opens VS Code, where the Dev
+Containers extension can build the container instead). Auto-build always
+prompts and never runs without an interactive TTY.
+
 The shell runs as `remoteUser` from `devcontainer.json` when set, then
-`containerUser`, otherwise the container image's `USER` applies.
+`containerUser`. When neither is set in `devcontainer.json`, dcode reads the
+container's `devcontainer.metadata` Docker label (written by the Dev Containers
+extension / devcontainers/cli) and applies the same `remoteUser` →
+`containerUser` resolution against the merged metadata layers, so users defined
+by base images like `mcr.microsoft.com/devcontainers/javascript-node`
+(`remoteUser: node`) are honored. If still nothing is set, the container
+image's `USER` applies.
 
 The working directory matches the URI logic: `<workspaceFolder>/<worktree-relative-path>`
 for worktrees, otherwise `<workspaceFolder>`. The path is probed with `test -d`;
@@ -95,12 +146,15 @@ Limitations:
 Common errors:
 
 - No `devcontainer.json`: exits non-zero and points you at `dcode doctor`.
-- Container not running: no matching devcontainer was found; open the project in
-  VS Code first.
-- Container stopped: run `dcode <path>` to start it.
+- Container not running, in a non-interactive context (e.g. piped): no
+  matching devcontainer was found and `dcode shell` cannot prompt; run it
+  interactively, or run `dcode <path>` first.
+- Container stopped: `dcode shell` will prompt to start it.
 - Multiple matching containers: clean up the duplicate containers listed in the
   error.
 - Docker not available: install/start Docker or Docker Desktop and try again.
+- Dev Containers CLI not installed and user declined install: see the
+  *Auto-build* section above for the curl/npm install commands.
 
 To open a folder literally named `shell`, run `dcode ./shell`.
 
@@ -109,9 +163,11 @@ To open a folder literally named `shell`, run `dcode ./shell`.
 Diagnose the local environment for dcode and print a "what would `dcode <path>` do here?"
 plan summary. Read-only — never patches `settings.json` or spawns the editor.
 
-Checks: VS Code editor on PATH, Dev Containers extension, Docker daemon, git, WSL setup
-(distro, Windows-side `settings.json`, `dev.containers.executeInWSL`), devcontainer
-discovery + parse, worktree sanity, dcode version vs latest GitHub release, install method.
+Checks: VS Code editor on PATH, Dev Containers extension, Docker daemon,
+Dev Containers CLI on PATH (used by `dcode shell` to auto-build a missing
+devcontainer), git, WSL setup (distro, Windows-side `settings.json`,
+`dev.containers.executeInWSL`), devcontainer discovery + parse, worktree
+sanity, dcode version vs latest GitHub release, install method.
 
 ```bash
 dcode doctor              # inspect current directory

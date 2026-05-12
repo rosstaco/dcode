@@ -20,7 +20,7 @@ from rich.table import Table
 from rich.text import Text
 
 import dcode
-from dcode import update, version_check
+from dcode import devcontainer_cli, update, version_check
 from dcode._rich import STATUS_STYLES, get_console
 from dcode.core import (
     build_uri,
@@ -163,6 +163,21 @@ def check_docker() -> CheckResult:
         )
     version = result.stdout.strip() or "unknown"
     return ("ok", f"Container runtime: docker daemon reachable ({version})", None)
+
+
+def check_devcontainer_cli() -> CheckResult:
+    cli = devcontainer_cli.find_cli()
+    if cli is None:
+        return (
+            "warn",
+            "Dev Containers CLI: not on PATH "
+            f"or at {devcontainer_cli.DEFAULT_INSTALL_PREFIX}/bin/devcontainer "
+            "(needed by `dcode shell` to build a missing devcontainer)",
+            devcontainer_cli.install_hint(),
+        )
+    version = devcontainer_cli.cli_version(cli)
+    detail = f" ({version})" if version else ""
+    return ("ok", f"Dev Containers CLI: {cli}{detail}", None)
 
 
 def check_git() -> CheckResult:
@@ -598,7 +613,7 @@ def render_plan(
 
 _SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Editor", ("editor", "extension")),
-    ("Container", ("docker",)),
+    ("Container", ("docker", "devcontainer_cli")),
     ("Git", ("git",)),
     ("WSL", ("wsl", "wsl_distro", "wsl_settings_paths", "wsl_execute_in_wsl")),
     ("Workspace", ("devcontainer", "devcontainer_parses", "worktree")),
@@ -639,6 +654,7 @@ def run_doctor(path: Path, console: Console | None = None) -> int:
     collect("editor", check_editor)
     collect("extension", check_extension)
     collect("docker", check_docker)
+    collect("devcontainer_cli", check_devcontainer_cli)
     collect("git", check_git)
 
     collect("wsl", check_wsl)
