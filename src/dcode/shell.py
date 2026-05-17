@@ -20,7 +20,7 @@ from typing import Literal
 import json5
 
 from dcode import devcontainer_cli
-from dcode.core import find_devcontainer, get_workspace_folder, resolve_worktree
+from dcode.core import find_devcontainer, get_workspace_folder, resolve_target
 from dcode.wsl import _wsl_to_windows_path, get_windows_vscode_settings_path, is_wsl
 
 _ContainerState = Literal[
@@ -660,12 +660,14 @@ def run_shell(path: str, *, insiders: bool, shell_override: str | None) -> int:
     """
     target = Path(path).resolve()
 
-    worktree = resolve_worktree(target)
-    if worktree is not None:
-        main_repo, rel_path = worktree
-    else:
-        main_repo = target
-        rel_path = None
+    project_root, container_subdir = resolve_target(target)
+    # `main_repo` is kept as the local name for project_root so the rest
+    # of the file (error messages, find_container, build, label, etc.)
+    # reads naturally without a sweeping rename.
+    main_repo = project_root
+    rel_path: Path | None = (
+        None if container_subdir == Path(".") else container_subdir
+    )
 
     devcontainer_path = find_devcontainer(main_repo)
     if devcontainer_path is None:

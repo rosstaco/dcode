@@ -934,6 +934,83 @@ class TestRunShell:
         candidate = probe_mock.call_args.args[1]
         assert candidate == "/workspaces/main-repo/.worktrees/pr-34"
 
+    def test_worktree_subdir_uses_main_repo_and_deeper_workdir(self, tmp_path):
+        # Regression: `dcode shell` from inside a worktree subdir must
+        # resolve the main repo and point the container working directory
+        # at the deeper folder. Previously this failed with
+        # "no devcontainer.json found" because we only looked at the exact
+        # target dir for a `.git` pointer.
+        main_repo, worktree = _make_worktree(tmp_path)
+        (main_repo / ".devcontainer").mkdir()
+        (main_repo / ".devcontainer" / "devcontainer.json").write_text(
+            '{"workspaceFolder": "/workspaces/main-repo"}'
+        )
+        deep = worktree / "src" / "lib"
+        deep.mkdir(parents=True)
+
+        find_mock = MagicMock(
+            return_value=ContainerLookup(state="running", id="cid")
+        )
+        probe_mock = MagicMock(
+            return_value="/workspaces/main-repo/.worktrees/pr-34/src/lib"
+        )
+        with (
+            patch("dcode.shell.find_container", find_mock),
+            patch("dcode.shell._inspect_container_metadata", return_value=[]),
+            patch("dcode.shell.find_ssh_socket", return_value=None),
+            patch("dcode.shell.probe_workdir", probe_mock),
+            patch("dcode.shell.resolve_terminal_profile", return_value=None),
+            patch("dcode.shell.detect_login_shell", return_value="/bin/sh"),
+            patch("dcode.shell.os.execvp"),
+            patch("sys.stdin") as stdin,
+            patch("sys.stdout") as stdout,
+        ):
+            stdin.isatty = MagicMock(return_value=True)
+            stdout.isatty = MagicMock(return_value=True)
+            run_shell(str(deep), insiders=False, shell_override=None)
+
+        host_arg = find_mock.call_args.args[0]
+        assert host_arg == str(main_repo.resolve())
+
+        candidate = probe_mock.call_args.args[1]
+        assert candidate == "/workspaces/main-repo/.worktrees/pr-34/src/lib"
+
+    def test_plain_repo_subdir_resolves_devcontainer_at_repo_root(self, tmp_path):
+        # `dcode shell` from a subdir of a plain (non-worktree) repo walks
+        # up to find the .git directory and the devcontainer there.
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".devcontainer").mkdir()
+        (tmp_path / ".devcontainer" / "devcontainer.json").write_text(
+            '{"workspaceFolder": "/workspaces/proj"}'
+        )
+        deep = tmp_path / "pkg" / "module"
+        deep.mkdir(parents=True)
+
+        find_mock = MagicMock(
+            return_value=ContainerLookup(state="running", id="cid")
+        )
+        probe_mock = MagicMock(return_value="/workspaces/proj/pkg/module")
+        with (
+            patch("dcode.shell.find_container", find_mock),
+            patch("dcode.shell._inspect_container_metadata", return_value=[]),
+            patch("dcode.shell.find_ssh_socket", return_value=None),
+            patch("dcode.shell.probe_workdir", probe_mock),
+            patch("dcode.shell.resolve_terminal_profile", return_value=None),
+            patch("dcode.shell.detect_login_shell", return_value="/bin/sh"),
+            patch("dcode.shell.os.execvp"),
+            patch("sys.stdin") as stdin,
+            patch("sys.stdout") as stdout,
+        ):
+            stdin.isatty = MagicMock(return_value=True)
+            stdout.isatty = MagicMock(return_value=True)
+            run_shell(str(deep), insiders=False, shell_override=None)
+
+        host_arg = find_mock.call_args.args[0]
+        assert host_arg == str(tmp_path.resolve())
+
+        candidate = probe_mock.call_args.args[1]
+        assert candidate == "/workspaces/proj/pkg/module"
+
 
 class TestRunShellStoppedPrompt:
     def _run_stopped(

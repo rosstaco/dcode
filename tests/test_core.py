@@ -9,9 +9,11 @@ import pytest
 from conftest import _make_worktree
 
 from dcode.core import (
+    _find_project_root,
     build_uri,
     find_devcontainer,
     get_workspace_folder,
+    resolve_target,
     resolve_worktree,
 )
 
@@ -346,3 +348,119 @@ class TestRunDcodeWorktree:
 
         uri = mock_run.call_args[0][0][2]
         assert uri.endswith("/workspace/.worktrees/pr-34")
+
+
+class TestFindProjectRoot:
+    def test_finds_git_dir_in_target(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        assert _find_project_root(tmp_path) == tmp_path
+
+    def test_finds_git_file_in_target_worktree_root(self, tmp_path):
+        _, worktree = _make_worktree(tmp_path)
+        assert _find_project_root(worktree) == worktree
+
+    def test_walks_up_from_repo_subdir(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        sub = tmp_path / "src" / "deep"
+        sub.mkdir(parents=True)
+        assert _find_project_root(sub) == tmp_path
+
+    def test_walks_up_from_worktree_subdir(self, tmp_path):
+        _, worktree = _make_worktree(tmp_path)
+        sub = worktree / "src" / "deep"
+        sub.mkdir(parents=True)
+        assert _find_project_root(sub) == worktree
+
+    def test_returns_none_when_no_git_anywhere(self, tmp_path):
+        sub = tmp_path / "a" / "b" / "c"
+        sub.mkdir(parents=True)
+        assert _find_project_root(sub) is None
+
+
+class TestResolveTarget:
+    def test_plain_repo_root(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        root, sub = resolve_target(tmp_path)
+        assert root == tmp_path
+        assert sub == Path(".")
+
+    def test_plain_repo_subdir(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        deep = tmp_path / "src" / "lib"
+        deep.mkdir(parents=True)
+        root, sub = resolve_target(deep)
+        assert root == tmp_path
+        assert sub == Path("src/lib")
+
+    def test_worktree_root(self, tmp_path):
+        main_repo, worktree = _make_worktree(tmp_path)
+        root, sub = resolve_target(worktree)
+        assert root == main_repo
+        assert sub == Path(".worktrees/pr-34")
+
+    def test_worktree_subdir(self, tmp_path):
+        main_repo, worktree = _make_worktree(tmp_path)
+        deep = worktree / "src" / "lib"
+        deep.mkdir(parents=True)
+        root, sub = resolve_target(deep)
+        assert root == main_repo
+        assert sub == Path(".worktrees/pr-34/src/lib")
+
+    def test_non_repo_returns_target_unchanged(self, tmp_path):
+        sub = tmp_path / "no" / "git" / "here"
+        sub.mkdir(parents=True)
+        root, subdir = resolve_target(sub)
+        assert root == sub
+        assert subdir == Path(".")
+
+
+class TestRunDcodeSubdir:
+    """Subdir-of-repo and subdir-of-worktree variants of run_dcode."""
+
+    def test_subdir_of_plain_repo_opens_inside_container(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        dc_dir = tmp_path / ".devcontainer"
+        dc_dir.mkdir()
+        (dc_dir / "devcontainer.json").write_text('{"name": "x"}')
+        deep = tmp_path / "pkg" / "module"
+        deep.mkdir(parents=True)
+
+        with patch("dcode.core.subprocess.run", return_value=_ok()) as mock_run:
+            from dcode.core import run_dcode
+            run_dcode(str(deep), insiders=False)
+
+        argv = mock_run.call_args[0][0]
+        assert argv[0] == "code"
+        assert argv[1] == "--folder-uri"
+        uri = argv[2]
+        assert uri.startswith("vscode-remote://dev-container+")
+        # workspace folder default is /workspaces/<repo-name>, then /pkg/module
+        assert uri.endswith(f"/workspaces/{tmp_path.name}/pkg/module")
+
+    def test_subdir_of_worktree_opens_inside_shared_container(self, tmp_path):
+        main_repo, worktree = _make_worktree(tmp_path)
+        dc_dir = main_repo / ".devcontainer"
+        dc_dir.mkdir()
+        (dc_dir / "devcontainer.json").write_text('{"name": "x"}')
+        deep = worktree / "src" / "lib"
+        deep.mkdir(parents=True)
+
+        with patch("dcode.core.subprocess.run", return_value=_ok()) as mock_run:
+            from dcode.core import run_dcode
+            run_dcode(str(deep))
+
+        uri = mock_run.call_args[0][0][2]
+        # main repo is the host path → /workspaces/<main_repo_name>
+        # plus the worktree-relative path plus the subdir
+        assert uri.endswith(
+            f"/workspaces/{main_repo.name}/.worktrees/pr-34/src/lib"
+        )
+
+    def test_subdir_outside_repo_no_devcontainer_falls_back(self, tmp_path):
+        sub = tmp_path / "lonely" / "folder"
+        sub.mkdir(parents=True)
+        with patch("dcode.core.subprocess.run", return_value=_ok()) as mock_run:
+            from dcode.core import run_dcode
+            run_dcode(str(sub))
+        argv = mock_run.call_args[0][0]
+        assert argv == ["code", str(sub)]

@@ -26,6 +26,7 @@ from dcode.core import (
     build_uri,
     find_devcontainer,
     get_workspace_folder,
+    resolve_target,
     resolve_worktree,
 )
 from dcode.wsl import (
@@ -279,21 +280,17 @@ def check_wsl_executeInWSL_settings() -> list[CheckResult]:
 
 
 def check_devcontainer(target: Path) -> CheckResult:
-    worktree = resolve_worktree(target)
-    if worktree is not None:
-        main_repo, _ = worktree
-        devcontainer = find_devcontainer(main_repo)
-        if devcontainer:
-            return ("ok", f"devcontainer: {devcontainer}", None)
+    project_root, _ = resolve_target(target)
+    devcontainer = find_devcontainer(project_root)
+    if devcontainer:
+        return ("ok", f"devcontainer: {devcontainer}", None)
+    if project_root != target:
         return (
             "warn",
-            f"devcontainer: none in main repo ({main_repo}) — "
+            f"devcontainer: none in project root ({project_root}) — "
             "dcode will fall back to opening the directory directly",
             "add .devcontainer/devcontainer.json to enable container support",
         )
-    devcontainer = find_devcontainer(target)
-    if devcontainer:
-        return ("ok", f"devcontainer: {devcontainer}", None)
     return (
         "warn",
         f"devcontainer: none found in {target} — "
@@ -303,12 +300,8 @@ def check_devcontainer(target: Path) -> CheckResult:
 
 
 def check_devcontainer_parses(target: Path) -> CheckResult:
-    worktree = resolve_worktree(target)
-    if worktree is not None:
-        main_repo, _ = worktree
-        devcontainer = find_devcontainer(main_repo)
-    else:
-        devcontainer = find_devcontainer(target)
+    project_root, _ = resolve_target(target)
+    devcontainer = find_devcontainer(project_root)
     if devcontainer is None:
         return ("skip", "devcontainer.json: no file to parse", None)
     try:
@@ -483,86 +476,80 @@ def _build_plan_renderable(
         editor = "code-insiders"
         extra_note = '(showing code-insiders plan; "code" not on PATH)'
 
-    worktree = resolve_worktree(target)
-    if worktree is not None:
-        main_repo, rel_path = worktree
-        devcontainer = find_devcontainer(main_repo)
-    else:
-        main_repo, rel_path = None, None
-        devcontainer = find_devcontainer(target)
+    project_root, container_subdir = resolve_target(target)
+    devcontainer = find_devcontainer(project_root)
+    is_worktree = (
+        project_root != target and (project_root / ".git").is_dir()
+    ) or resolve_worktree(project_root) is not None
+    # `resolve_worktree` reports whether the project_root itself is a
+    # worktree pointer. The `is_worktree` flag drives only the cyan
+    # "Detected git worktree" hint.
 
     pieces: list[RenderableType] = []
 
     if devcontainer is None:
-        if main_repo is not None:
+        if project_root != target:
             pieces.append(
-                Text(f"Detected git worktree (main repo: {main_repo}).", style="cyan")
+                Text(
+                    f"Detected project root at {project_root}.", style="cyan"
+                )
             )
             pieces.append(
                 Text(
-                    f"No devcontainer found in main repo — would open {target} in "
-                    f"{editor} directly (no container).",
+                    f"No devcontainer found in project root — would open "
+                    f"{target} in {editor} directly (no container).",
                     overflow="fold",
                 )
             )
         else:
-            git_file = target / ".git"
-            if git_file.is_file():
-                pieces.append(
-                    Text(
-                        f"{target} looks like a worktree or submodule but cannot "
-                        "be resolved.",
-                        style="yellow",
-                        overflow="fold",
-                    )
+            pieces.append(
+                Text(
+                    f"No devcontainer found — would open {target} in {editor} "
+                    "directly.",
+                    overflow="fold",
                 )
-                pieces.append(
-                    Text(
-                        f"Would open {target} in {editor} directly without "
-                        "shared-container support.",
-                        overflow="fold",
-                    )
-                )
-            else:
-                pieces.append(
-                    Text(
-                        f"No devcontainer found — would open {target} in {editor} "
-                        "directly.",
-                        overflow="fold",
-                    )
-                )
+            )
         if extra_note:
             pieces.append(Text(extra_note, style="dim"))
         return Group(*pieces)
 
     # Devcontainer branch
     rows: list[tuple[str, str]] = []
-    if main_repo is not None:
-        host_path = str(main_repo)
-        base = get_workspace_folder(devcontainer, main_repo)
-        workspace_folder = f"{base}/{rel_path.as_posix()}"
-        pieces.append(Text("Detected git worktree.", style="cyan"))
-        pieces.append(
-            Text(
-                f"Would open the MAIN repo at {main_repo} so all worktrees share "
-                "one container.",
-                overflow="fold",
-            )
-        )
-        rows.append(("editor", editor))
-        rows.append(("host path", host_path))
-        rows.append(
-            (
-                "effective workspaceFolder",
-                f"{workspace_folder} (= {base} + /{rel_path.as_posix()})",
-            )
-        )
+    host_path = str(project_root)
+    base = get_workspace_folder(devcontainer, project_root)
+    if container_subdir == Path("."):
+        workspace_folder = base
+        ws_detail = workspace_folder
     else:
-        host_path = str(target)
-        workspace_folder = get_workspace_folder(devcontainer, target)
-        rows.append(("editor", editor))
-        rows.append(("host path", host_path))
-        rows.append(("effective workspaceFolder", workspace_folder))
+        workspace_folder = f"{base}/{container_subdir.as_posix()}"
+        ws_detail = (
+            f"{workspace_folder} (= {base} + /{container_subdir.as_posix()})"
+        )
+
+    if project_root != target:
+        if is_worktree:
+            pieces.append(Text("Detected git worktree.", style="cyan"))
+            pieces.append(
+                Text(
+                    f"Would anchor at the main repo {project_root} so all "
+                    "worktrees share one container.",
+                    overflow="fold",
+                )
+            )
+        else:
+            pieces.append(
+                Text(f"Detected project root at {project_root}.", style="cyan")
+            )
+            pieces.append(
+                Text(
+                    f"Would open {target} inside the project's container.",
+                    overflow="fold",
+                )
+            )
+
+    rows.append(("editor", editor))
+    rows.append(("host path", host_path))
+    rows.append(("effective workspaceFolder", ws_detail))
 
     rows.append(("devcontainer config path", str(devcontainer)))
 

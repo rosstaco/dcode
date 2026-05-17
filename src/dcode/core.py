@@ -22,6 +22,25 @@ def _find_repo_root(start: Path) -> Path | None:
     return None
 
 
+def _find_project_root(target: Path) -> Path | None:
+    """Walk *target* and its ancestors for a ``.git`` (file or dir).
+
+    Returns the directory containing the ``.git`` entry, or ``None`` if no
+    such ancestor exists (target is outside any git repository / worktree).
+    Used so ``dcode shell`` and ``dcode <path>`` work from a subdirectory
+    of a repo or worktree, not only from the root.
+    """
+    current = target
+    while True:
+        git = current / ".git"
+        if git.is_file() or git.is_dir():
+            return current
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+
+
 def resolve_worktree(target: Path) -> tuple[Path, Path] | None:
     """If *target* is a git worktree root, return ``(main_repo, rel_path)``.
 
@@ -72,6 +91,54 @@ def resolve_worktree(target: Path) -> tuple[Path, Path] | None:
         return None
 
     return (main_repo, rel_path)
+
+
+def resolve_target(target: Path) -> tuple[Path, Path]:
+    """Resolve *target* to ``(project_root, container_subdir)``.
+
+    ``project_root`` is the host directory that owns the devcontainer —
+    for a plain repo it's the repo root; for a worktree it's the **main
+    repo** so all worktrees share one container.
+
+    ``container_subdir`` is the path **relative to** the devcontainer's
+    ``workspaceFolder`` that ``target`` corresponds to inside the
+    container, so callers can open / set the working directory there.
+    Empty :class:`Path` (``Path('.')``) means *target* maps directly to
+    the workspace folder root.
+
+    When *target* is outside any git repo / worktree, returns
+    ``(target, Path('.'))`` so the existing "no devcontainer" code path
+    keeps working unchanged.
+    """
+    project_root = _find_project_root(target)
+    if project_root is None:
+        return (target, Path("."))
+
+    # Worktree: project_root is the worktree dir, with a `.git` *file*
+    # pointing back at <main_repo>/.git/worktrees/<name>. Anchor the
+    # container at the main repo so worktrees share it.
+    if (project_root / ".git").is_file():
+        worktree = resolve_worktree(project_root)
+        if worktree is not None:
+            main_repo, wt_rel = worktree
+            try:
+                inside_wt = target.relative_to(project_root)
+            except ValueError:  # pragma: no cover - defensive
+                inside_wt = Path(".")
+            container_subdir = (
+                wt_rel if inside_wt == Path(".") else wt_rel / inside_wt
+            )
+            return (main_repo, container_subdir)
+        # `.git` file that isn't a real worktree (submodule, malformed,
+        # external worktree): fall back to treating project_root as the
+        # anchor directly.
+
+    # Plain repo (`.git` is a directory) or unresolvable worktree pointer.
+    try:
+        container_subdir = target.relative_to(project_root)
+    except ValueError:  # pragma: no cover - defensive
+        container_subdir = Path(".")
+    return (project_root, container_subdir)
 
 
 def find_devcontainer(target: Path) -> Path | None:
@@ -140,15 +207,8 @@ def run_dcode(path: str, *, insiders: bool = False) -> None:
     editor = "code-insiders" if insiders else "code"
     target = Path(path).resolve()
 
-    # For worktrees, resolve the main repo so all worktrees share one container.
-    worktree = resolve_worktree(target)
-    if worktree is not None:
-        main_repo, rel_path = worktree
-        devcontainer = find_devcontainer(main_repo)
-    else:
-        main_repo = None
-        rel_path = None
-        devcontainer = find_devcontainer(target)
+    project_root, container_subdir = resolve_target(target)
+    devcontainer = find_devcontainer(project_root)
 
     if devcontainer is None:
         rc = _launch_editor([editor, str(target)], label=f"Launching {editor}...")
@@ -156,13 +216,12 @@ def run_dcode(path: str, *, insiders: bool = False) -> None:
             sys.exit(rc)
         return
 
-    if main_repo is not None:
-        host_path = str(main_repo)
-        base_folder = get_workspace_folder(devcontainer, main_repo)
-        workspace_folder = f"{base_folder}/{rel_path.as_posix()}"
+    host_path = str(project_root)
+    base_folder = get_workspace_folder(devcontainer, project_root)
+    if container_subdir == Path("."):
+        workspace_folder = base_folder
     else:
-        host_path = str(target)
-        workspace_folder = get_workspace_folder(devcontainer, target)
+        workspace_folder = f"{base_folder}/{container_subdir.as_posix()}"
 
     if is_wsl():
         uri = build_uri_wsl(host_path, workspace_folder)

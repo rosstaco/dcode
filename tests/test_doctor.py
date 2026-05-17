@@ -340,7 +340,7 @@ class TestCheckDevcontainer:
         _, worktree = _make_worktree(tmp_path)
         status, msg, _ = doctor.check_devcontainer(worktree)
         assert status == "warn"
-        assert "main repo" in msg
+        assert "project root" in msg
 
 
 class TestCheckDevcontainerParses:
@@ -530,15 +530,17 @@ class TestRenderPlan:
         with patch("dcode.doctor.is_wsl", return_value=False):
             doctor.render_plan(worktree, code_present=True, insiders_present=False)
         err = capsys.readouterr().err
-        assert "MAIN repo" in err
+        assert "main repo" in err
         assert "/work/.worktrees/pr-34" in err
 
     def test_external_worktree(self, tmp_path, capsys):
+        # A .git file that points at a non-existent gitdir reverts to plain
+        # behaviour: project_root == target, no devcontainer, plain open.
         (tmp_path / ".git").write_text("gitdir: /elsewhere/that/does/not/exist\n")
         with patch("dcode.doctor.is_wsl", return_value=False):
             doctor.render_plan(tmp_path, code_present=True, insiders_present=False)
         err = capsys.readouterr().err
-        assert "cannot be resolved" in err
+        assert "No devcontainer found" in err
 
     def test_wsl_shows_uri_and_settings(self, tmp_path, capsys):
         dc = tmp_path / ".devcontainer"
